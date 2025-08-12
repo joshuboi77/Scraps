@@ -13,7 +13,7 @@ import sys
 # Tokenization
 # ----------------------------
 
-OPERATORS = {"+", "-", "*", "/", "=", "<", ">", "!=", "<=", ">="}
+OPERATORS = {"+", "-", "*", "/", "=", "<", ">", "!=", "<=", ">=", "=="}
 GROUPERS = {"(": "LP", ")": "RP"}
 
 @dataclass
@@ -149,8 +149,17 @@ class PrintStmt:
     expr: Any
 
 @dataclass
+class TestStmt:
+    expr: Any
+
+@dataclass
 class ExprStmt:
     expr: Any
+
+@dataclass
+class Call:
+    func: Any
+    args: list
 
 # ----------------------------
 # Parser (Pratt-style for precedence, no parentheses in MVP)
@@ -160,7 +169,7 @@ class ExprStmt:
 PRECEDENCE = {
     "*": 3, "/": 3,
     "+": 2, "-": 2,
-    "<": 1, ">": 1, "<=": 1, ">=": 1, "!=": 1,
+    "<": 1, ">": 1, "<=": 1, ">=": 1, "==": 1, "!=": 1,
 }
 
 class Parser:
@@ -208,6 +217,11 @@ class Parser:
             self._pop()
             expr = self.expr(0)
             return PrintStmt(expr)
+        # TEST statement: evaluate expr and print TRUE/FALSE
+        if t.kind == "ID" and t.lex == "TEST":
+            self._pop()
+            expr = self.expr(0)
+            return TestStmt(expr)
         # assignment: IDENT = expr
         if t.kind == "ID":
             # lookahead for '='
@@ -227,6 +241,15 @@ class Parser:
             left: Any = Num(t.val)
         elif t.kind == "ID":
             left = Var(t.lex)
+            # function call form: IDENT(...)
+            while self._accept("LP"):
+                args = []
+                if not self._accept("RP"):
+                    args.append(self.expr(0))
+                    while self._accept("OP", ","):
+                        args.append(self.expr(0))
+                    self._expect("RP")
+                left = Call(left, args)
         elif t.kind == "OP" and t.lex == "-":
             # unary minus binds tighter than *; treat as 4
             rhs = self.expr(4)
@@ -257,6 +280,12 @@ class Parser:
 class Env:
     def __init__(self):
         self.vars: Dict[str, Any] = {}
+        # Built-in functions
+        self.vars["OUTPUT"] = lambda v: self._builtin_output(v)
+
+    def _builtin_output(self, v):
+        print(v)
+        return v
 
     def get(self, name: str) -> Any:
         if name in self.vars:
@@ -293,6 +322,7 @@ class Evaluator:
             if op == ">": return a > b
             if op == "<=": return a <= b
             if op == ">=": return a >= b
+            if op == "==": return a == b
             if op == "!=": return a != b
             raise RuntimeError(f"unknown op {op}")
         if isinstance(node, Assign):
@@ -303,15 +333,27 @@ class Evaluator:
             v = self.eval(node.expr)
             print(v)
             return v
+        if isinstance(node, TestStmt):
+            v = self.eval(node.expr)
+            # Treat truthy strictly as boolean True/False
+            out = "TRUE" if bool(v) else "FALSE"
+            print(out)
+            return out
         if isinstance(node, ExprStmt):
             return self.eval(node.expr)
+        if isinstance(node, Call):
+            fn = self.eval(node.func)
+            args = [self.eval(arg) for arg in node.args]
+            if callable(fn):
+                return fn(*args)
+            raise RuntimeError(f"{node.func} is not callable")
         raise RuntimeError(f"unknown node {node}")
 
 # ----------------------------
 # REPL / Runner
 # ----------------------------
 
-BANNER = "atoms-lang stage-0 | ops: + - * / = < > <= >= != | identifiers: UTF-8 | () grouping | newline-terminated"
+BANNER = "atoms-lang stage-0 | ops: + - * / = < > <= >= == != | identifiers: UTF-8 | () grouping | newline-terminated"
 
 EXAMPLE = """
 # examples:
@@ -319,10 +361,10 @@ x = 10
 y = 3
 PRINT (x + y) * 2
 PRINT x * (y + 2)
-PRINT x / y
-PRINT x > y
-PRINT x <= (y * 4)
-PRINT (x + 1) != (y + 1)
+TEST x == 10
+TEST x <= (y * 4)
+TEST (x + 1) != (y + 1)
+TEST (x + y) > 12
 """.strip()
 
 def run_source(src: str, env: Optional[Env]=None) -> Any:
