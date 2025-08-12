@@ -1,5 +1,3 @@
-
-
 #!/usr/bin/env python3
 # Stage-0: minimal atoms language (operators: + - * / = < >) with UTF-8 identifiers and PRINT.
 # Goal: tokenize → parse → eval. No parentheses, no commas, no keywords besides PRINT.
@@ -15,7 +13,8 @@ import sys
 # Tokenization
 # ----------------------------
 
-OPERATORS = {"+", "-", "*", "/", "=", "<", ">"}
+OPERATORS = {"+", "-", "*", "/", "=", "<", ">", "!=", "<=", ">="}
+GROUPERS = {"(": "LP", ")": "RP"}
 
 @dataclass
 class Tok:
@@ -78,7 +77,19 @@ class Lexer:
                 val = float(txt) if "." in txt else int(txt)
                 ts.append(Tok("NUM", txt, val, (start_line, start_col)))
                 continue
-            # operator (single char only from atom set)
+            # two-char operators first
+            nxt = self.s[self.i+1] if self.i+1 < self.n else ""
+            pair = ch + nxt
+            if pair in OPERATORS:
+                ts.append(Tok("OP", pair, pair, (self.line, self.col)))
+                self._adv(); self._adv()
+                continue
+            # groupers
+            if ch in GROUPERS:
+                ts.append(Tok(GROUPERS[ch], ch, ch, (self.line, self.col)))
+                self._adv()
+                continue
+            # operator (single char)
             if ch in OPERATORS:
                 ts.append(Tok("OP", ch, ch, (self.line, self.col)))
                 self._adv()
@@ -149,7 +160,7 @@ class ExprStmt:
 PRECEDENCE = {
     "*": 3, "/": 3,
     "+": 2, "-": 2,
-    "<": 1, ">": 1,
+    "<": 1, ">": 1, "<=": 1, ">=": 1, "!=": 1,
 }
 
 class Parser:
@@ -220,6 +231,9 @@ class Parser:
             # unary minus binds tighter than *; treat as 4
             rhs = self.expr(4)
             left = Bin("*", Num(-1), rhs)
+        elif t.kind == "LP":
+            left = self.expr(0)
+            self._expect("RP")
         else:
             raise SyntaxError(f"Unexpected token {t.kind} {t.lex} at {t.pos}")
 
@@ -277,6 +291,9 @@ class Evaluator:
             if op == "/": return a / b
             if op == "<": return a < b
             if op == ">": return a > b
+            if op == "<=": return a <= b
+            if op == ">=": return a >= b
+            if op == "!=": return a != b
             raise RuntimeError(f"unknown op {op}")
         if isinstance(node, Assign):
             val = self.eval(node.expr)
@@ -294,17 +311,18 @@ class Evaluator:
 # REPL / Runner
 # ----------------------------
 
-BANNER = "atoms-lang stage-0 | ops: + - * / = < > | identifiers: UTF-8 | statements end with newline"
+BANNER = "atoms-lang stage-0 | ops: + - * / = < > <= >= != | identifiers: UTF-8 | () grouping | newline-terminated"
 
 EXAMPLE = """
 # examples:
 x = 10
 y = 3
-PRINT x + y
-PRINT x * y + 2
+PRINT (x + y) * 2
+PRINT x * (y + 2)
 PRINT x / y
 PRINT x > y
-PRINT -x + 4 * y
+PRINT x <= (y * 4)
+PRINT (x + 1) != (y + 1)
 """.strip()
 
 def run_source(src: str, env: Optional[Env]=None) -> Any:
