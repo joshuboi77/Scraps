@@ -13,7 +13,7 @@ import sys
 # Tokenization
 # ----------------------------
 
-OPERATORS = {"+", "-", "*", "/", "=", "<", ">", "!=", "<=", ">=", "=="}
+OPERATORS = {"+", "-", "*", "/", "=", "<", ">", "!=", "<=", ">=", "==", ">|", "|<", "!"}
 GROUPERS = {"(": "LP", ")": "RP"}
 
 @dataclass
@@ -190,6 +190,11 @@ class Num:
 class Str:
     value: str
 
+# Boolean literal node
+@dataclass
+class Bool:
+    value: bool
+
 @dataclass
 class Var:
     name: str
@@ -253,6 +258,7 @@ PRECEDENCE = {
     "*": 3, "/": 3,
     "+": 2, "-": 2,
     "<": 1, ">": 1, "<=": 1, ">=": 1, "==": 1, "!=": 1,
+    ">|": 0, "|<": 0,
 }
 
 class Parser:
@@ -423,25 +429,83 @@ class Parser:
         elif t.kind == "NUM":
             left = Num(t.val)
         elif t.kind == "ID":
-            left = Var(t.lex)
-            # function call form: IDENT(...)
-            while self._accept("LP"):
-                args = []
-                if not self._accept("RP"):
-                    args.append(self.expr(0))
-                    while self._accept("COMMA"):
+            if t.lex == "TRUE":
+                left = Bool(True)
+            elif t.lex == "FALSE":
+                left = Bool(False)
+            else:
+                left = Var(t.lex)
+                # function call form: IDENT(...)
+                while self._accept("LP"):
+                    args = []
+                    if not self._accept("RP"):
                         args.append(self.expr(0))
-                    self._expect("RP")
-                left = Call(left, args)
+                        while self._accept("COMMA"):
+                            args.append(self.expr(0))
+                        self._expect("RP")
+                    left = Call(left, args)
         elif t.kind == "OP" and t.lex == "-":
             # unary minus binds tighter than *; treat as 4
             rhs = self.expr(4)
             left = Bin("*", Num(-1), rhs)
+        elif t.kind == "OP" and t.lex == "!":
+            # logical NOT binds tightly (higher than comparisons)
+            rhs = self.expr(4)
+            left = Call(Var("__NOT__"), [rhs])
         elif t.kind == "LP":
             left = self.expr(0)
             self._expect("RP")
         else:
             raise SyntaxError(f"Unexpected token {t.kind} {t.lex} at {t.pos}")
+
+        # Allow postfix arrows on certain calls to form expressions, e.g. UNPACK(..) <- box
+        while True:
+            nt = self._peek()
+            if nt.kind == "ARROW_L":
+                # read-from arrow, valid for UNPACK(..) and COUNT(..)
+                # only if the current left is a Call of those names
+                if isinstance(left, Call) and isinstance(left.func, Var) and left.func.name in ("UNPACK", "COUNT"):
+                    self._pop()  # consume '<-'
+                    box_e = self.expr(0)
+                    if left.func.name == "UNPACK":
+                        # left.args is [start] or [start,end]
+                        start_e = left.args[0] if len(left.args) >= 1 else Num(0)
+                        end_e = left.args[1] if len(left.args) >= 2 else None
+                        left = UnpackExpr(box_e, start_e, end_e)
+                    else:  # COUNT
+                        # COUNT(...) <- box : interpret as COUNT( UNPACK(box, ...) ) when args present,
+                        # or COUNT(box) when no args.
+                        if len(left.args) == 0:
+                            left = Call(Var("COUNT"), [box_e])
+                        elif len(left.args) == 1:
+                            left = Call(Var("COUNT"), [UnpackExpr(box_e, left.args[0], None)])
+                        else:
+                            left = Call(Var("COUNT"), [UnpackExpr(box_e, left.args[0], left.args[1])])
+                    continue
+                else:
+                    break  # arrow not applicable here
+            elif nt.kind == "ARROW_R":
+                # write-to arrow, valid for PACK(..) and PLACE(..)
+                if isinstance(left, Call) and isinstance(left.func, Var) and left.func.name in ("PACK", "PLACE"):
+                    self._pop()  # consume '->'
+                    box_e = self.expr(0)
+                    if left.func.name == "PACK":
+                        left = PackStmt(left.args, box_e)
+                    else:  # PLACE
+                        # PLACE takes pairs like i: v, represented during call as [Bin(":", i, v)] or we already split earlier.
+                        # Here, left.args is a flat list of expressions in the original order (i, v, i, v, ...)
+                        # But our current statement parser handled COLON pairing; in expression form we'll reuse the flat list
+                        # by converting pairs [e0,e1,e2,e3,...] -> [(e0,e1),(e2,e3),...]
+                        args = left.args
+                        if len(args) % 2 != 0:
+                            raise SyntaxError("PLACE: expected pairs i: v in arguments")
+                        pairs = [(args[i], args[i+1]) for i in range(0, len(args), 2)]
+                        left = PlaceStmt(pairs, box_e)
+                    continue
+                else:
+                    break  # arrow not applicable here
+            else:
+                break
 
         while True:
             nt = self._peek()
@@ -467,15 +531,27 @@ class Env:
         self.vars["OUTPUT"] = lambda v: self._builtin_output(v)
         self.vars["BOX"] = lambda: []
         self.vars["COUNT"] = self._builtin_count
+        self.vars["__NOT__"] = lambda v: self._builtin_not(v)
+
+    def _fmt(self, v):
+        if isinstance(v, bool):
+            return "TRUE" if v else "FALSE"
+        return v
 
     def _builtin_output(self, v):
-        print(v)
+        out = self._fmt(v)
+        print(out)
         return v
 
     def _builtin_count(self, x):
         if isinstance(x, (list, str)):
             return len(x)
         raise TypeError("COUNT: type")
+
+    def _builtin_not(self, v):
+        if isinstance(v, bool):
+            return not v
+        raise TypeError("!: type")
 
     def get(self, name: str) -> Any:
         if name in self.vars:
@@ -500,12 +576,34 @@ class Evaluator:
             return node.value
         if isinstance(node, Str):
             return node.value
+        if isinstance(node, Bool):
+            return node.value
         if isinstance(node, Var):
             return self.env.get(node.name)
         if isinstance(node, Bin):
-            a = self.eval(node.left)
-            b = self.eval(node.right)
             op = node.op
+            a = self.eval(node.left)
+            # short-circuit logical ops with strict booleans
+            if op == ">|":  # OR
+                if not isinstance(a, bool):
+                    raise TypeError(">|: type")
+                if a:
+                    return True
+                b = self.eval(node.right)
+                if not isinstance(b, bool):
+                    raise TypeError(">|: type")
+                return a or b
+            if op == "|<":  # AND
+                if not isinstance(a, bool):
+                    raise TypeError("|<: type")
+                if not a:
+                    return False
+                b = self.eval(node.right)
+                if not isinstance(b, bool):
+                    raise TypeError("|<: type")
+                return a and b
+            # non-boolean binary ops evaluate RHS normally
+            b = self.eval(node.right)
             if op == "+": return a + b
             if op == "-": return a - b
             if op == "*": return a * b
@@ -532,7 +630,7 @@ class Evaluator:
                 return res
             else:
                 v = self.eval(node.expr)
-                print(v)
+                print(self.env._fmt(v))
                 return v
         if isinstance(node, TestStmt):
             v = self.eval(node.expr)
@@ -622,7 +720,7 @@ class Evaluator:
 # REPL / Runner
 # ----------------------------
 
-BANNER = "atoms-lang stage-0 | ops: + - * / = < > <= >= == != | verbs: PACK(...) -> box, PLACE(...) -> box, UNPACK(a, b) <- box, PICK(i, ...) <- box | identifiers: UTF-8 | () grouping | newline-terminated"
+BANNER = "atoms-lang stage-0 | ops: + - * / = < > <= >= == !=  >|  |<  ! | bools: TRUE/FALSE | verbs: PACK(...) -> box, PLACE(...) -> box, UNPACK(a, b) <- box, PICK(i, ...) <- box | identifiers: UTF-8 | () grouping | newline-terminated"
 
 EXAMPLE = '''
 # examples:
@@ -630,15 +728,24 @@ box = BOX()
 PACK(1, 2, 3) -> box
 PRINT box             # [1, 2, 3]
 PRINT COUNT(box)      # 3
-PRINT UNPACK(1) <- box  # 2
-PRINT UNPACK(1, 3) <- box  # [2, 3]
+PRINT (UNPACK(1) <- box)  # 2
+PRINT (UNPACK(1, 3) <- box)  # [2, 3]
 PRINT PICK(0, 2) <- box      # [1, 3]
 PRINT PICK(2, 2, 0) <- box    # [3, 3, 1]
 PLACE(1: 9, 0: 7) -> box
 PRINT box             # [7, 9, 3]
+PRINT TRUE            # TRUE
+TEST (1 < 2)          # TRUE
 # String literal and PRINT as code:
 # PRINT "1 + 2"        # prints 3
 # PRINT "PRINT 4 + 5"  # prints 9, then None
+
+# Logic operator demo:
+PRINT (TRUE >| (PACK(99) -> box))   # TRUE  (PACK not executed)
+PRINT (FALSE |< (UNPACK(0) <- box)) # FALSE (UNPACK not executed)
+PRINT (!TRUE)                       # FALSE
+PRINT (TRUE |< FALSE)               # FALSE
+PRINT (FALSE >| (1 < 2))            # TRUE
 '''.strip()
 
 def run_source(src: str, env: Optional[Env]=None) -> Any:
