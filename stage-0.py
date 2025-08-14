@@ -60,6 +60,62 @@ class Lexer:
                 ts.append(Tok("NL", "\n", pos=(self.line, self.col)))
                 self._adv()
                 continue
+
+            # ARROW tokens
+            nxt = self.s[self.i+1] if self.i+1 < self.n else ""
+            if ch == "-" and nxt == ">":
+                ts.append(Tok("ARROW_R", "->", pos=(self.line, self.col)))
+                self._adv(); self._adv()
+                continue
+            if ch == "<" and nxt == "-":
+                ts.append(Tok("ARROW_L", "<-", pos=(self.line, self.col)))
+                self._adv(); self._adv()
+                continue
+
+            # comma
+            if ch == ",":
+                ts.append(Tok("COMMA", ",", pos=(self.line, self.col)))
+                self._adv()
+                continue
+
+            # colon
+            if ch == ":":
+                ts.append(Tok("COLON", ":", pos=(self.line, self.col)))
+                self._adv()
+                continue
+
+            # string literal: "..." with escapes \n, \t, \\, \"
+            if ch == '"':
+                start_line, start_col = self.line, self.col
+                self._adv()  # consume opening quote
+                buf = []
+                while True:
+                    c = self._peek()
+                    if c == "":
+                        raise SyntaxError(f"Unterminated string at {start_line}:{start_col}")
+                    if c == '"':
+                        self._adv()  # closing quote
+                        break
+                    if c == "\\":
+                        self._adv()
+                        esc = self._peek()
+                        if esc == "":
+                            raise SyntaxError(f"Unterminated escape at {self.line}:{self.col}")
+                        # simple escapes
+                        mapping = {'n': '\n', 't': '\t', '"': '"', '\\': '\\'}
+                        if esc in mapping:
+                            buf.append(mapping[esc])
+                            self._adv()
+                        else:
+                            # unknown escape: keep char as-is
+                            buf.append(esc)
+                            self._adv()
+                        continue
+                    # regular char
+                    buf.append(self._adv())
+                ts.append(Tok("STRING", '"' + ''.join(buf) + '"', ''.join(buf), (start_line, start_col)))
+                continue
+
             # number (int/float)
             if ch.isdigit():
                 start_line, start_col = self.line, self.col
@@ -129,6 +185,11 @@ class Lexer:
 class Num:
     value: Any
 
+# String literal node
+@dataclass
+class Str:
+    value: str
+
 @dataclass
 class Var:
     name: str
@@ -160,6 +221,28 @@ class ExprStmt:
 class Call:
     func: Any
     args: list
+
+@dataclass
+class PackStmt:
+    values: List[Any]
+    box: Any  # expression
+
+@dataclass
+class PlaceStmt:
+    pairs: List[Tuple[Any, Any]]  # (index_expr, value_expr)
+    box: Any
+
+@dataclass
+class UnpackExpr:
+    box: Any
+    start: Any
+    end: Optional[Any]  # None means single element
+
+# PICK(i1, i2, ...) <- box
+@dataclass
+class PickExpr:
+    box: Any
+    indices: List[Any]
 
 # ----------------------------
 # Parser (Pratt-style for precedence, no parentheses in MVP)
@@ -198,6 +281,22 @@ class Parser:
             raise SyntaxError(f"Expected {kind} {lex or ''} at {t.pos}, got {t.kind} {t.lex}")
         return self._pop()
 
+    def _parse_args(self) -> List[Any]:
+        args: List[Any] = []
+        if self._accept("RP"):
+            return args
+        args.append(self.expr(0))
+        while self._accept("COMMA"):
+            args.append(self.expr(0))
+        self._expect("RP")
+        return args
+
+    def _expect_id(self, name: str) -> Tok:
+        t = self._expect("ID")
+        if t.lex != name:
+            raise SyntaxError(f'Expected identifier "{name}" at {t.pos}, got {t.lex}')
+        return t
+
     def parse(self) -> List[Any]:
         items: List[Any] = []
         # allow leading newlines
@@ -222,6 +321,88 @@ class Parser:
             self._pop()
             expr = self.expr(0)
             return TestStmt(expr)
+
+        # PACK(v1, v2, ...) -> box
+        if t.kind == "ID" and t.lex == "PACK":
+            self._pop()                 # PACK
+            self._expect("LP")          # (
+            vals = self._parse_args()   # ) consumed inside
+            if self._accept("ARROW_R"):
+                box_expr = self.expr(0)
+                return PackStmt(vals, box_expr)
+            else:
+                raise SyntaxError("Expected '->' after PACK(...)")
+
+        # PLACE(i: v, j: w, ...) -> box
+        if t.kind == "ID" and t.lex == "PLACE":
+            self._pop()                 # PLACE
+            self._expect("LP")
+            pairs: List[Tuple[Any, Any]] = []
+            if not self._accept("RP"):
+                while True:
+                    idx = self.expr(0)
+                    self._expect("COLON")
+                    val = self.expr(0)
+                    pairs.append((idx, val))
+                    if self._accept("COMMA"):
+                        continue
+                    self._expect("RP")
+                    break
+            if self._accept("ARROW_R"):
+                box_expr = self.expr(0)
+                return PlaceStmt(pairs, box_expr)
+            else:
+                raise SyntaxError("Expected '->' after PLACE(...)")
+
+        # UNPACK(a, b, ...) <- box
+        if t.kind == "ID" and t.lex == "UNPACK":
+            self._pop()  # UNPACK
+            self._expect("LP")
+            start_e = self.expr(0)
+            end_e: Optional[Any] = None
+            if self._accept("COMMA"):
+                end_e = self.expr(0)
+            self._expect("RP")
+            if self._accept("ARROW_L"):
+                box_e = self.expr(0)
+                return UnpackExpr(box_e, start_e, end_e)
+            else:
+                # legacy: UNPACK(box: start, ...)
+                raise SyntaxError("Expected '<-' after UNPACK(...), use UNPACK(a, b) <- box")
+
+        # PICK(i1, i2, ...) <- box  (non-contiguous selection)
+        if t.kind == "ID" and t.lex == "PICK":
+            self._pop()  # PICK
+            self._expect("LP")
+            idx_exprs: List[Any] = []
+            if not self._accept("RP"):
+                idx_exprs.append(self.expr(0))
+                while self._accept("COMMA"):
+                    idx_exprs.append(self.expr(0))
+                self._expect("RP")
+            if self._accept("ARROW_L"):
+                box_e = self.expr(0)
+                return PickExpr(box_e, idx_exprs)
+            else:
+                raise SyntaxError("Expected '<-' after PICK(...), use PICK(i, j) <- box")
+
+        # COUNT(a, b, ...) <- box (if applicable)
+        if t.kind == "ID" and t.lex == "COUNT":
+            self._pop()  # COUNT
+            self._expect("LP")
+            start_e = self.expr(0)
+            end_e: Optional[Any] = None
+            if self._accept("COMMA"):
+                end_e = self.expr(0)
+            self._expect("RP")
+            if self._accept("ARROW_L"):
+                box_e = self.expr(0)
+                # COUNT(a, b) <- box  is interpreted as UNPACK(box, a, b) and then len(...)
+                # But in MVP, just return UnpackExpr and let evaluator handle
+                return Call(Var("COUNT"), [UnpackExpr(box_e, start_e, end_e)])
+            else:
+                raise SyntaxError("Expected '<-' after COUNT(...), use COUNT(a, b) <- box")
+
         # assignment: IDENT = expr
         if t.kind == "ID":
             # lookahead for '='
@@ -237,8 +418,10 @@ class Parser:
     def expr(self, min_bp: int) -> Any:
         # prefix: number or identifier; allow unary minus for numbers/vars
         t = self._pop()
-        if t.kind == "NUM":
-            left: Any = Num(t.val)
+        if t.kind == "STRING":
+            left: Any = Str(t.val)
+        elif t.kind == "NUM":
+            left = Num(t.val)
         elif t.kind == "ID":
             left = Var(t.lex)
             # function call form: IDENT(...)
@@ -246,7 +429,7 @@ class Parser:
                 args = []
                 if not self._accept("RP"):
                     args.append(self.expr(0))
-                    while self._accept("OP", ","):
+                    while self._accept("COMMA"):
                         args.append(self.expr(0))
                     self._expect("RP")
                 left = Call(left, args)
@@ -282,10 +465,17 @@ class Env:
         self.vars: Dict[str, Any] = {}
         # Built-in functions
         self.vars["OUTPUT"] = lambda v: self._builtin_output(v)
+        self.vars["BOX"] = lambda: []
+        self.vars["COUNT"] = self._builtin_count
 
     def _builtin_output(self, v):
         print(v)
         return v
+
+    def _builtin_count(self, x):
+        if isinstance(x, (list, str)):
+            return len(x)
+        raise TypeError("COUNT: type")
 
     def get(self, name: str) -> Any:
         if name in self.vars:
@@ -307,6 +497,8 @@ class Evaluator:
 
     def eval(self, node: Any) -> Any:
         if isinstance(node, Num):
+            return node.value
+        if isinstance(node, Str):
             return node.value
         if isinstance(node, Var):
             return self.env.get(node.name)
@@ -330,9 +522,18 @@ class Evaluator:
             self.env.set(node.name, val)
             return val
         if isinstance(node, PrintStmt):
-            v = self.eval(node.expr)
-            print(v)
-            return v
+            # If printing a string literal, treat its contents as a code snippet:
+            # evaluate it in the *same* environment and print the resulting value.
+            if isinstance(node.expr, Str):
+                src = node.expr.value
+                # Ensure the snippet ends with a newline so the parser sees a complete unit
+                res = run_source(src + "\n", self.env)
+                print(res)
+                return res
+            else:
+                v = self.eval(node.expr)
+                print(v)
+                return v
         if isinstance(node, TestStmt):
             v = self.eval(node.expr)
             # Treat truthy strictly as boolean True/False
@@ -347,25 +548,98 @@ class Evaluator:
             if callable(fn):
                 return fn(*args)
             raise RuntimeError(f"{node.func} is not callable")
+
+        if isinstance(node, PackStmt):
+            box = self.eval(node.box)
+            if not isinstance(box, list):
+                raise TypeError("PACK: type")
+            vals = [self.eval(v) for v in node.values]
+            box.extend(vals)
+            return box
+
+        if isinstance(node, PlaceStmt):
+            box = self.eval(node.box)
+            if not isinstance(box, list):
+                raise TypeError("PLACE: type")
+            for idx_e, val_e in node.pairs:
+                i = self.eval(idx_e)
+                v = self.eval(val_e)
+                if not isinstance(i, int) or i < 0 or i >= len(box):
+                    raise IndexError("PLACE: bounds")
+                box[i] = v
+            return box
+
+        if isinstance(node, UnpackExpr):
+            box = self.eval(node.box)
+            i0 = self.eval(node.start)
+            if node.end is None:
+                if isinstance(box, list):
+                    if not isinstance(i0, int) or i0 < 0 or i0 >= len(box):
+                        raise IndexError("UNPACK: bounds")
+                    return box[i0]
+                if isinstance(box, str):
+                    if not isinstance(i0, int) or i0 < 0 or i0 >= len(box):
+                        raise IndexError("UNPACK: bounds")
+                    return box[i0]
+                raise TypeError("UNPACK: type")
+            else:
+                i1 = self.eval(node.end)
+                if not (isinstance(i0, int) and isinstance(i1, int)):
+                    raise TypeError("UNPACK: index type")
+                if isinstance(box, list):
+                    if i0 < 0 or i1 < i0 or i1 > len(box):
+                        raise IndexError("UNPACK: bounds")
+                    return box[i0:i1]
+                if isinstance(box, str):
+                    if i0 < 0 or i1 < i0 or i1 > len(box):
+                        raise IndexError("UNPACK: bounds")
+                    return box[i0:i1]
+                raise TypeError("UNPACK: type")
+
+        if isinstance(node, PickExpr):
+            box = self.eval(node.box)
+            idxs = [self.eval(e) for e in node.indices]
+            # type checks for indices
+            for i in idxs:
+                if not isinstance(i, int):
+                    raise TypeError("PICK: index type")
+            if isinstance(box, list):
+                # bounds check
+                for i in idxs:
+                    if i < 0 or i >= len(box):
+                        raise IndexError("PICK: bounds")
+                return [box[i] for i in idxs]
+            if isinstance(box, str):
+                for i in idxs:
+                    if i < 0 or i >= len(box):
+                        raise IndexError("PICK: bounds")
+                return ''.join(box[i] for i in idxs)
+            raise TypeError("PICK: type")
+
         raise RuntimeError(f"unknown node {node}")
 
 # ----------------------------
 # REPL / Runner
 # ----------------------------
 
-BANNER = "atoms-lang stage-0 | ops: + - * / = < > <= >= == != | identifiers: UTF-8 | () grouping | newline-terminated"
+BANNER = "atoms-lang stage-0 | ops: + - * / = < > <= >= == != | verbs: PACK(...) -> box, PLACE(...) -> box, UNPACK(a, b) <- box, PICK(i, ...) <- box | identifiers: UTF-8 | () grouping | newline-terminated"
 
-EXAMPLE = """
+EXAMPLE = '''
 # examples:
-x = 10
-y = 3
-PRINT (x + y) * 2
-PRINT x * (y + 2)
-TEST x == 10
-TEST x <= (y * 4)
-TEST (x + 1) != (y + 1)
-TEST (x + y) > 12
-""".strip()
+box = BOX()
+PACK(1, 2, 3) -> box
+PRINT box             # [1, 2, 3]
+PRINT COUNT(box)      # 3
+PRINT UNPACK(1) <- box  # 2
+PRINT UNPACK(1, 3) <- box  # [2, 3]
+PRINT PICK(0, 2) <- box      # [1, 3]
+PRINT PICK(2, 2, 0) <- box    # [3, 3, 1]
+PLACE(1: 9, 0: 7) -> box
+PRINT box             # [7, 9, 3]
+# String literal and PRINT as code:
+# PRINT "1 + 2"        # prints 3
+# PRINT "PRINT 4 + 5"  # prints 9, then None
+'''.strip()
 
 def run_source(src: str, env: Optional[Env]=None) -> Any:
     env = env or Env()
