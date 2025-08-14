@@ -14,7 +14,7 @@ import sys
 # ----------------------------
 
 OPERATORS = {"+", "-", "*", "/", "=", "<", ">", "!=", "<=", ">=", "==", ">|", "|<", "!"}
-GROUPERS = {"(": "LP", ")": "RP"}
+GROUPERS = {"(": "LP", ")": "RP", "{": "LC", "}": "RC"}
 
 @dataclass
 class Tok:
@@ -243,11 +243,26 @@ class UnpackExpr:
     start: Any
     end: Optional[Any]  # None means single element
 
-# PICK(i1, i2, ...) <- box
 @dataclass
 class PickExpr:
     box: Any
     indices: List[Any]
+
+# ----------- Blocks and control flow ----------
+@dataclass
+class Block:
+    items: List[Any]  # statements inside { }
+
+@dataclass
+class IfExpr:
+    cond: Any
+    then_block: Any  # Block
+    else_block: Any  # Block
+
+@dataclass
+class WhileStmt:
+    cond: Any
+    body: Any  # Block
 
 # ----------------------------
 # Parser (Pratt-style for precedence, no parentheses in MVP)
@@ -303,6 +318,23 @@ class Parser:
             raise SyntaxError(f'Expected identifier "{name}" at {t.pos}, got {t.lex}')
         return t
 
+    def _block(self) -> Block:
+        # assumes current token is LC
+        self._expect("LC")
+        # consume leading newlines
+        while self._accept("NL"):
+            pass
+        items: List[Any] = []
+        while True:
+            t = self._peek()
+            if t.kind == "RC":
+                self._pop()
+                break
+            items.append(self.stmt())
+            while self._accept("NL"):
+                pass
+        return Block(items)
+
     def parse(self) -> List[Any]:
         items: List[Any] = []
         # allow leading newlines
@@ -327,6 +359,23 @@ class Parser:
             self._pop()
             expr = self.expr(0)
             return TestStmt(expr)
+
+        # IF cond { ... } ELSE { ... }  (expression that yields the last value of the taken block)
+        if t.kind == "ID" and t.lex == "IF":
+            self._pop()
+            cond_e = self.expr(0)
+            then_b = self._block()
+            # optional ELSE required for Stage-0 clarity
+            self._expect_id("ELSE")
+            else_b = self._block()
+            return IfExpr(cond_e, then_b, else_b)
+
+        # WHILE cond { ... }
+        if t.kind == "ID" and t.lex == "WHILE":
+            self._pop()
+            cond_e = self.expr(0)
+            body_b = self._block()
+            return WhileStmt(cond_e, body_b)
 
         # PACK(v1, v2, ...) -> box
         if t.kind == "ID" and t.lex == "PACK":
@@ -455,6 +504,10 @@ class Parser:
         elif t.kind == "LP":
             left = self.expr(0)
             self._expect("RP")
+        elif t.kind == "LC":
+            # already consumed LC in t; put it back by stepping index back by one and call _block()
+            self.i -= 1
+            left = self._block()
         else:
             raise SyntaxError(f"Unexpected token {t.kind} {t.lex} at {t.pos}")
 
@@ -526,12 +579,13 @@ class Parser:
 
 class Env:
     def __init__(self):
-        self.vars: Dict[str, Any] = {}
-        # Built-in functions
-        self.vars["OUTPUT"] = lambda v: self._builtin_output(v)
-        self.vars["BOX"] = lambda: []
-        self.vars["COUNT"] = self._builtin_count
-        self.vars["__NOT__"] = lambda v: self._builtin_not(v)
+        self.scopes: List[Dict[str, Any]] = [{}]
+        # Built-ins in global scope
+        g = self.scopes[0]
+        g["OUTPUT"] = lambda v: self._builtin_output(v)
+        g["BOX"] = lambda: []
+        g["COUNT"] = self._builtin_count
+        g["__NOT__"] = lambda v: self._builtin_not(v)
 
     def _fmt(self, v):
         if isinstance(v, bool):
@@ -554,12 +608,23 @@ class Env:
         raise TypeError("!: type")
 
     def get(self, name: str) -> Any:
-        if name in self.vars:
-            return self.vars[name]
+        for scope in reversed(self.scopes):
+            if name in scope:
+                return scope[name]
         raise NameError(f"Undefined name: {name}")
 
     def set(self, name: str, val: Any) -> None:
-        self.vars[name] = val
+        for scope in reversed(self.scopes):
+            if name in scope:
+                scope[name] = val
+                return
+        self.scopes[-1][name] = val
+
+    def push(self):
+        self.scopes.append({})
+
+    def pop(self):
+        self.scopes.pop()
 
 class Evaluator:
     def __init__(self, env: Env):
@@ -572,6 +637,7 @@ class Evaluator:
         return last
 
     def eval(self, node: Any) -> Any:
+        print(f"[DEBUG] Evaluating node type: {type(node).__name__}")
         if isinstance(node, Num):
             return node.value
         if isinstance(node, Str):
@@ -618,6 +684,7 @@ class Evaluator:
         if isinstance(node, Assign):
             val = self.eval(node.expr)
             self.env.set(node.name, val)
+            print(f"[DEBUG] Assign {node.name} = {val}")
             return val
         if isinstance(node, PrintStmt):
             # If printing a string literal, treat its contents as a code snippet:
@@ -652,6 +719,7 @@ class Evaluator:
             if not isinstance(box, list):
                 raise TypeError("PACK: type")
             vals = [self.eval(v) for v in node.values]
+            print(f"[DEBUG] PACK -> {box} with {vals}")
             box.extend(vals)
             return box
 
@@ -714,13 +782,39 @@ class Evaluator:
                 return ''.join(box[i] for i in idxs)
             raise TypeError("PICK: type")
 
+        if isinstance(node, Block):
+            self.env.push()
+            last = None
+            for it in node.items:
+                last = self.eval(it)
+            self.env.pop()
+            return last
+
+        if isinstance(node, IfExpr):
+            cond = self.eval(node.cond)
+            if not isinstance(cond, bool):
+                raise TypeError("IF: type")
+            return self.eval(node.then_block) if cond else self.eval(node.else_block)
+
+        if isinstance(node, WhileStmt):
+            result = None
+            while True:
+                cond = self.eval(node.cond)
+                if not isinstance(cond, bool):
+                    raise TypeError("WHILE: type")
+                if not cond:
+                    break
+                print(f"[DEBUG] WHILE iteration with i = {self.env.get('i')}")
+                result = self.eval(node.body)
+            return result
+
         raise RuntimeError(f"unknown node {node}")
 
 # ----------------------------
 # REPL / Runner
 # ----------------------------
 
-BANNER = "atoms-lang stage-0 | ops: + - * / = < > <= >= == !=  >|  |<  ! | bools: TRUE/FALSE | verbs: PACK(...) -> box, PLACE(...) -> box, UNPACK(a, b) <- box, PICK(i, ...) <- box | identifiers: UTF-8 | () grouping | newline-terminated"
+BANNER = "atoms-lang stage-0 | ops: + - * / = < > <= >= == !=  >|  |<  ! | bools: TRUE/FALSE | control: { }, IF/ELSE, WHILE | verbs: PACK(...) -> box, PLACE(...) -> box, UNPACK(a, b) <- box, PICK(i, ...) <- box | identifiers: UTF-8 | () grouping | newline-terminated"
 
 EXAMPLE = '''
 # examples:
@@ -746,6 +840,15 @@ PRINT (FALSE |< (UNPACK(0) <- box)) # FALSE (UNPACK not executed)
 PRINT (!TRUE)                       # FALSE
 PRINT (TRUE |< FALSE)               # FALSE
 PRINT (FALSE >| (1 < 2))            # TRUE
+
+# Control flow demo:
+i = 0
+WHILE (i < 3) {
+  PACK(i) -> box
+  i = i + 1
+}
+PRINT box            # [1, 2, 3, 0, 1, 2] if run after earlier PACKs; or [0,1,2] fresh
+PRINT (IF TRUE { 42 } ELSE { 0 })   # 42
 '''.strip()
 
 def run_source(src: str, env: Optional[Env]=None) -> Any:
@@ -759,23 +862,44 @@ def run_source(src: str, env: Optional[Env]=None) -> Any:
     return ev.eval_prog(prog)
 
 
+
+
 def repl() -> None:
     print(BANNER)
     env = Env()
     buf = ""
+
+    def flush_block():
+        nonlocal buf
+        if buf.strip() == "":
+            buf = ""
+            return
+        try:
+            run_source(buf, env)
+        except Exception as e:
+            print(f"! {e}")
+        buf = ""
+
     try:
         while True:
-            line = input("» ")
+            # Print prompt without letting input() manage newlines; this prevents extra blank lines
+            sys.stdout.write("» ")
+            sys.stdout.flush()
+            line = sys.stdin.readline()
+            if not line:
+                break
+            line = line[:-1] if line.endswith("\n") else line
             if line.strip() == ":quit":
                 break
-            buf += line + "\n"
-            # execute on blank line
+
+            # Empty line triggers execution of the buffered block; no brace logic
             if line.strip() == "":
-                try:
-                    run_source(buf, env)
-                except Exception as e:
-                    print(f"! {e}")
-                buf = ""
+                flush_block()
+                continue
+
+            # Otherwise, accumulate into the buffer as-is
+            buf += line + "\n"
+
     except (EOFError, KeyboardInterrupt):
         print()
 
