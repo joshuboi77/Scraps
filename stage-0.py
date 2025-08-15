@@ -227,6 +227,13 @@ class Call:
     func: Any
     args: list
 
+# Function definition node
+@dataclass
+class FuncDef:
+    name: str
+    params: list
+    body: Any
+
 @dataclass
 class PackStmt:
     values: List[Any]
@@ -350,18 +357,18 @@ class Parser:
     def stmt(self) -> Any:
         t = self._peek()
         # PRINT statement (reserved word only for statement position)
-        if t.kind == "ID" and t.lex == "PRINT":
+        if t.kind == "ID" and t.lex in ("PRINT", "print"):
             self._pop()
             expr = self.expr(0)
             return PrintStmt(expr)
         # TEST statement: evaluate expr and print TRUE/FALSE
-        if t.kind == "ID" and t.lex == "TEST":
+        if t.kind == "ID" and t.lex in ("TEST", "test"):
             self._pop()
             expr = self.expr(0)
             return TestStmt(expr)
 
         # IF cond { ... } ELSE { ... }  (expression that yields the last value of the taken block)
-        if t.kind == "ID" and t.lex == "IF":
+        if t.kind == "ID" and t.lex in ("IF", "if"):
             self._pop()
             cond_e = self.expr(0)
             then_b = self._block()
@@ -371,14 +378,14 @@ class Parser:
             return IfExpr(cond_e, then_b, else_b)
 
         # WHILE cond { ... }
-        if t.kind == "ID" and t.lex == "WHILE":
+        if t.kind == "ID" and t.lex in ("WHILE", "while"):
             self._pop()
             cond_e = self.expr(0)
             body_b = self._block()
             return WhileStmt(cond_e, body_b)
 
         # PACK(v1, v2, ...) -> box
-        if t.kind == "ID" and t.lex == "PACK":
+        if t.kind == "ID" and t.lex in ("PACK", "pack"):
             self._pop()                 # PACK
             self._expect("LP")          # (
             vals = self._parse_args()   # ) consumed inside
@@ -389,7 +396,7 @@ class Parser:
                 raise SyntaxError("Expected '->' after PACK(...)")
 
         # PLACE(i: v, j: w, ...) -> box
-        if t.kind == "ID" and t.lex == "PLACE":
+        if t.kind == "ID" and t.lex in ("PLACE", "place"):
             self._pop()                 # PLACE
             self._expect("LP")
             pairs: List[Tuple[Any, Any]] = []
@@ -410,7 +417,7 @@ class Parser:
                 raise SyntaxError("Expected '->' after PLACE(...)")
 
         # UNPACK(a, b, ...) <- box
-        if t.kind == "ID" and t.lex == "UNPACK":
+        if t.kind == "ID" and t.lex in ("UNPACK", "unpack"):
             self._pop()  # UNPACK
             self._expect("LP")
             start_e = self.expr(0)
@@ -426,7 +433,7 @@ class Parser:
                 raise SyntaxError("Expected '<-' after UNPACK(...), use UNPACK(a, b) <- box")
 
         # PICK(i1, i2, ...) <- box  (non-contiguous selection)
-        if t.kind == "ID" and t.lex == "PICK":
+        if t.kind == "ID" and t.lex in ("PICK", "pick"):
             self._pop()  # PICK
             self._expect("LP")
             idx_exprs: List[Any] = []
@@ -442,7 +449,7 @@ class Parser:
                 raise SyntaxError("Expected '<-' after PICK(...), use PICK(i, j) <- box")
 
         # COUNT(a, b, ...) <- box (if applicable)
-        if t.kind == "ID" and t.lex == "COUNT":
+        if t.kind == "ID" and t.lex in ("COUNT", "count"):
             self._pop()  # COUNT
             self._expect("LP")
             start_e = self.expr(0)
@@ -457,6 +464,35 @@ class Parser:
                 return Call(Var("COUNT"), [UnpackExpr(box_e, start_e, end_e)])
             else:
                 raise SyntaxError("Expected '<-' after COUNT(...), use COUNT(a, b) <- box")
+
+        # FUNCTION DEFINITION: fn(use(a, b, c)) { ... }
+        # Accept both "fn" and "FN"
+        if t.kind == "ID" and t.lex in ("FN", "fn"):
+            self._pop()  # FN/fn
+            self._expect("LP")
+            fn_name = "_anon"
+            # parse use(a, b, c)
+            use_tok = self._expect("ID")
+            if use_tok.lex not in ("USE", "use"):
+                raise SyntaxError(f"Expected 'use' in function parameter list, got {use_tok.lex}")
+            self._expect("LP")
+            param_names = []
+            if not self._accept("RP"):
+                first_param = self._expect("ID")
+                param_names.append(first_param.lex)
+                while self._accept("COMMA"):
+                    next_param = self._expect("ID")
+                    param_names.append(next_param.lex)
+                self._expect("RP")
+            # close fn(...)
+            self._expect("RP")
+            # function body block
+            body = self._block()
+            func = FuncDef(fn_name, param_names, body)
+            if self._accept("ARROW_R"):
+                dest = self._expect("ID").lex
+                return Assign(dest, func)
+            return func
 
         # assignment: IDENT = expr
         if t.kind == "ID":
@@ -482,6 +518,14 @@ class Parser:
                 left = Bool(True)
             elif t.lex == "FALSE":
                 left = Bool(False)
+            elif t.lex.lower() == "result":
+                # support `result(x)` as special syntax for calling RESULT
+                if self._accept("LP"):
+                    arg = self.expr(0)
+                    self._expect("RP")
+                    left = Call(Var("result"), [arg])
+                else:
+                    left = Var(t.lex)
             else:
                 left = Var(t.lex)
                 # function call form: IDENT(...)
@@ -516,16 +560,20 @@ class Parser:
             nt = self._peek()
             if nt.kind == "ARROW_L":
                 # read-from arrow, valid for UNPACK(..) and COUNT(..)
-                # only if the current left is a Call of those names
-                if isinstance(left, Call) and isinstance(left.func, Var) and left.func.name in ("UNPACK", "COUNT"):
+                # only if the current left is a Call of those names (case-insensitive)
+                if (
+                    isinstance(left, Call)
+                    and isinstance(left.func, Var)
+                    and left.func.name in ("UNPACK", "COUNT", "unpack", "count")
+                ):
                     self._pop()  # consume '<-'
                     box_e = self.expr(0)
-                    if left.func.name == "UNPACK":
+                    if left.func.name in ("UNPACK", "unpack"):
                         # left.args is [start] or [start,end]
                         start_e = left.args[0] if len(left.args) >= 1 else Num(0)
                         end_e = left.args[1] if len(left.args) >= 2 else None
                         left = UnpackExpr(box_e, start_e, end_e)
-                    else:  # COUNT
+                    else:  # COUNT or count
                         # COUNT(...) <- box : interpret as COUNT( UNPACK(box, ...) ) when args present,
                         # or COUNT(box) when no args.
                         if len(left.args) == 0:
@@ -580,12 +628,47 @@ class Parser:
 class Env:
     def __init__(self):
         self.scopes: List[Dict[str, Any]] = [{}]
-        # Built-ins in global scope
+        # Built-ins in global scope (lowercase only)
         g = self.scopes[0]
-        g["OUTPUT"] = lambda v: self._builtin_output(v)
-        g["BOX"] = lambda: []
-        g["COUNT"] = self._builtin_count
-        g["__NOT__"] = lambda v: self._builtin_not(v)
+        g["output"] = lambda v: self._builtin_output(v)
+        g["box"] = lambda: []
+        g["count"] = self._builtin_count
+        g["__not__"] = lambda v: self._builtin_not(v)
+        # Ensure "result" is present and not shadowed; no "RESULT" in builtins
+        g["result"] = self._builtin_result
+        g["pack"] = self._builtin_pack
+        g["place"] = self._builtin_place
+        g["unpack"] = self._builtin_unpack
+        g["pick"] = self._builtin_pick
+        g["fab"] = self._builtin_fab
+        g["print"] = self._builtin_print
+
+    # Stub definitions for built-in methods (for Pylance, etc.)
+    def _builtin_pack(self, *args):
+        raise NotImplementedError("_builtin_pack not yet implemented")
+
+    def _builtin_place(self, *args):
+        raise NotImplementedError("_builtin_place not yet implemented")
+
+    def _builtin_unpack(self, *args):
+        raise NotImplementedError("_builtin_unpack not yet implemented")
+
+    def _builtin_pick(self, *args):
+        raise NotImplementedError("_builtin_pick not yet implemented")
+
+    def _builtin_print(self, *args):
+        raise NotImplementedError("_builtin_print not yet implemented")
+    def _builtin_fab(self, f):
+        if isinstance(f, Func):
+            args = [self.get(p) for p in f.params]
+            return f(*args)
+        raise TypeError("FAB: expects function")
+    def _builtin_result(self, f):
+        if isinstance(f, Func):
+            # evaluate with captured param bindings
+            args = [self.get(p) for p in f.params]
+            return f(*args)
+        raise TypeError("RESULT: expects function")
 
     def _fmt(self, v):
         if isinstance(v, bool):
@@ -608,6 +691,7 @@ class Env:
         raise TypeError("!: type")
 
     def get(self, name: str) -> Any:
+        # No implicit case transformation or fallback to uppercase
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name]
@@ -625,6 +709,36 @@ class Env:
 
     def pop(self):
         self.scopes.pop()
+
+class Func:
+    def __init__(self, name: str, params: list, body: Any, env: Env):
+        self.name = name
+        self.params = params
+        self.body = body
+        # Closure: capture defining environment
+        self.env = env
+
+    def __call__(self, *args):
+        # New local environment, with params bound
+        new_env = Env()
+        # Shallow copy of all enclosing scopes for lookup (simulate closure)
+        new_env.scopes = self.env.scopes.copy() + [{}]
+        if len(args) != len(self.params):
+            raise TypeError(f"Function {self.name} expects {len(self.params)} arguments, got {len(args)}")
+        # Bind parameters in innermost scope
+        for k, v in zip(self.params, args):
+            new_env.scopes[-1][k] = v
+        # Evaluate function body in this context
+        evaluator = Evaluator(new_env)
+        result = evaluator.eval(self.body)
+        return result
+
+    def __repr__(self):
+        joined = ', '.join(f"{self.env.get(p)}{p}" for p in self.params)
+        return f"fn(use({joined})) {{ ... }}"
+
+    def as_box(self):
+        return [f"{self.env.get(p)}{p}" for p in self.params] + [self.body]
 
 class Evaluator:
     def __init__(self, env: Env):
@@ -707,6 +821,12 @@ class Evaluator:
             return out
         if isinstance(node, ExprStmt):
             return self.eval(node.expr)
+        if isinstance(node, FuncDef):
+            # Store function as Func object in the environment
+            func_obj = Func(node.name, node.params, node.body, self.env)
+            self.env.set(node.name, func_obj)
+            print(f"[DEBUG] Defined function {node.name}({', '.join(node.params)})")
+            return func_obj
         if isinstance(node, Call):
             fn = self.eval(node.func)
             args = [self.eval(arg) for arg in node.args]
@@ -737,6 +857,8 @@ class Evaluator:
 
         if isinstance(node, UnpackExpr):
             box = self.eval(node.box)
+            if isinstance(box, Func):
+                box = box.as_box()
             i0 = self.eval(node.start)
             if node.end is None:
                 if isinstance(box, list):
@@ -764,6 +886,8 @@ class Evaluator:
 
         if isinstance(node, PickExpr):
             box = self.eval(node.box)
+            if isinstance(box, Func):
+                box = box.as_box()
             idxs = [self.eval(e) for e in node.indices]
             # type checks for indices
             for i in idxs:
@@ -814,7 +938,7 @@ class Evaluator:
 # REPL / Runner
 # ----------------------------
 
-BANNER = "atoms-lang stage-0 | ops: + - * / = < > <= >= == !=  >|  |<  ! | bools: TRUE/FALSE | control: { }, IF/ELSE, WHILE | verbs: PACK(...) -> box, PLACE(...) -> box, UNPACK(a, b) <- box, PICK(i, ...) <- box | identifiers: UTF-8 | () grouping | newline-terminated"
+BANNER = "scraps-lang stage-0 | ops: + - * / = < > <= >= == !=  >|  |<  ! | bools: TRUE/FALSE | control: { }, IF/ELSE, WHILE | verbs: PACK(...) -> box, PLACE(...) -> box, UNPACK(a, b) <- box, PICK(i, ...) <- box | identifiers: UTF-8 | () grouping | newline-terminated"
 
 EXAMPLE = '''
 # examples:
@@ -913,3 +1037,87 @@ if __name__ == "__main__":
         with open(sys.argv[1], "r", encoding="utf-8") as f:
             src = f.read()
         run_source(src)
+    def _builtin_fab(self, f):
+        if isinstance(f, Func):
+            args = [self.get(p) for p in f.params]
+            return f(*args)
+        raise TypeError("FAB: expects function")
+    # Built-in implementations for lowercase vocabulary
+    def _builtin_pack(self, *args):
+        # Expects last arg is the box
+        if len(args) < 1:
+            raise TypeError("pack: expects at least one argument (box)")
+        *vals, box = args
+        if not isinstance(box, list):
+            raise TypeError("pack: last argument must be a box (list)")
+        box.extend(vals)
+        return box
+
+    def _builtin_place(self, *args):
+        # expects pairs of (idx, val), then box
+        if len(args) < 1:
+            raise TypeError("place: expects at least one argument (box)")
+        box = args[-1]
+        pairs = args[:-1]
+        if not isinstance(box, list):
+            raise TypeError("place: last argument must be a box (list)")
+        if len(pairs) % 2 != 0:
+            raise TypeError("place: expects pairs of (idx, value)")
+        for i in range(0, len(pairs), 2):
+            idx = pairs[i]
+            val = pairs[i+1]
+            if not isinstance(idx, int) or idx < 0 or idx >= len(box):
+                raise IndexError("place: index out of bounds")
+            box[idx] = val
+        return box
+
+    def _builtin_unpack(self, *args):
+        # expects box, start, [end]
+        if len(args) < 2:
+            raise TypeError("unpack: expects at least 2 arguments (box, start)")
+        box = args[0]
+        start = args[1]
+        end = args[2] if len(args) > 2 else None
+        if isinstance(box, Func):
+            box = box.as_box()
+        if end is None:
+            if isinstance(box, list) or isinstance(box, str):
+                if not isinstance(start, int) or start < 0 or start >= len(box):
+                    raise IndexError("unpack: index out of bounds")
+                return box[start]
+            raise TypeError("unpack: box type")
+        else:
+            if not (isinstance(start, int) and isinstance(end, int)):
+                raise TypeError("unpack: index type")
+            if isinstance(box, list) or isinstance(box, str):
+                if start < 0 or end < start or end > len(box):
+                    raise IndexError("unpack: slice out of bounds")
+                return box[start:end]
+            raise TypeError("unpack: box type")
+
+    def _builtin_pick(self, *args):
+        # expects box, i1, i2, ...
+        if len(args) < 2:
+            raise TypeError("pick: expects at least box and one index")
+        box = args[0]
+        idxs = args[1:]
+        if isinstance(box, Func):
+            box = box.as_box()
+        for idx in idxs:
+            if not isinstance(idx, int):
+                raise TypeError("pick: index type")
+        if isinstance(box, list):
+            for idx in idxs:
+                if idx < 0 or idx >= len(box):
+                    raise IndexError("pick: index out of bounds")
+            return [box[idx] for idx in idxs]
+        if isinstance(box, str):
+            for idx in idxs:
+                if idx < 0 or idx >= len(box):
+                    raise IndexError("pick: index out of bounds")
+            return ''.join(box[idx] for idx in idxs)
+        raise TypeError("pick: box type")
+
+    def _builtin_print(self, v):
+        print(self._fmt(v))
+        return v
