@@ -209,6 +209,7 @@ class Bin:
 class Assign:
     name: str
     expr: Any
+    _rewire: bool = False
 
 @dataclass
 class PrintStmt:
@@ -494,6 +495,16 @@ class Parser:
                 return Assign(dest, func)
             return func
 
+        # REWIRE b = expr
+        if t.kind == "ID" and t.lex in ("REWIRE", "rewire"):
+            self._pop()  # consume 'rewire'
+            name_tok = self._expect("ID")
+            self._expect("OP", "=")
+            expr = self.expr(0)
+            node = Assign(name_tok.lex, expr)
+            node._rewire = True  # mark as rewire
+            return node
+
         # assignment: IDENT = expr
         if t.kind == "ID":
             # lookahead for '='
@@ -665,8 +676,8 @@ class Env:
         raise TypeError("FAB: expects function")
     def _builtin_result(self, f):
         if isinstance(f, Func):
-            # evaluate with captured param bindings
-            args = [self.get(p) for p in f.params]
+            # evaluate with captured param bindings from the closure environment
+            args = [f.env.get(p) for p in f.params]
             return f(*args)
         raise TypeError("RESULT: expects function")
 
@@ -715,19 +726,21 @@ class Func:
         self.name = name
         self.params = params
         self.body = body
-        # Closure: capture defining environment
-        self.env = env
+        # Closure: capture a copy of the current environment
+        self.env = Env()
+        self.env.scopes = [scope.copy() for scope in env.scopes]
 
     def __call__(self, *args):
         # New local environment, with params bound
         new_env = Env()
-        # Shallow copy of all enclosing scopes for lookup (simulate closure)
-        new_env.scopes = self.env.scopes.copy() + [{}]
+        # Deep copy of all enclosing scopes for lookup (simulate closure)
+        new_env.scopes = [scope.copy() for scope in self.env.scopes]
         if len(args) != len(self.params):
             raise TypeError(f"Function {self.name} expects {len(self.params)} arguments, got {len(args)}")
         # Bind parameters in innermost scope
         for k, v in zip(self.params, args):
             new_env.scopes[-1][k] = v
+        print(f"[DEBUG] Entering function {self.name} with params {self.params} and args {args}")
         # Evaluate function body in this context
         evaluator = Evaluator(new_env)
         result = evaluator.eval(self.body)
@@ -796,10 +809,18 @@ class Evaluator:
             if op == "!=": return a != b
             raise RuntimeError(f"unknown op {op}")
         if isinstance(node, Assign):
-            val = self.eval(node.expr)
-            self.env.set(node.name, val)
-            print(f"[DEBUG] Assign {node.name} = {val}")
-            return val
+            value = self.eval(node.expr)
+            if getattr(node, "_rewire", False):
+                # New logic for rewired variables:
+                if node.name in self.env.scopes[-1]:
+                    self.env.scopes[-1][node.name] = value
+                    print(f"[DEBUG] Rewired {node.name} = {value}")
+                else:
+                    raise RuntimeError(f"Cannot rewire undefined name: {node.name}")
+            else:
+                self.env.set(node.name, value)
+                print(f"[DEBUG] Assign {node.name} = {value} (from expr: {node.expr})")
+            return value
         if isinstance(node, PrintStmt):
             # If printing a string literal, treat its contents as a code snippet:
             # evaluate it in the *same* environment and print the resulting value.
@@ -823,13 +844,18 @@ class Evaluator:
             return self.eval(node.expr)
         if isinstance(node, FuncDef):
             # Store function as Func object in the environment
-            func_obj = Func(node.name, node.params, node.body, self.env)
-            self.env.set(node.name, func_obj)
+            fn = Func(node.name, node.params, node.body, self.env)
+            self.env.set(node.name, fn)  # ensure function is stored for external visibility
             print(f"[DEBUG] Defined function {node.name}({', '.join(node.params)})")
-            return func_obj
+            return fn
         if isinstance(node, Call):
             fn = self.eval(node.func)
-            args = [self.eval(arg) for arg in node.args]
+            # Evaluate arguments for debug print (but don't double-evaluate for call)
+            debug_args = [self.eval(arg) for arg in node.args]
+            print(f"[DEBUG] Calling function {fn} with args {debug_args}")
+            # Actually pass already-evaluated args to fn
+            # To avoid double evaluation, reuse debug_args
+            args = debug_args
             if callable(fn):
                 return fn(*args)
             raise RuntimeError(f"{node.func} is not callable")
