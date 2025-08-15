@@ -433,22 +433,6 @@ class Parser:
                 # legacy: UNPACK(box: start, ...)
                 raise SyntaxError("Expected '<-' after UNPACK(...), use UNPACK(a, b) <- box")
 
-        # PICK(i1, i2, ...) <- box  (non-contiguous selection)
-        if t.kind == "ID" and t.lex in ("PICK", "pick"):
-            self._pop()  # PICK
-            self._expect("LP")
-            idx_exprs: List[Any] = []
-            if not self._accept("RP"):
-                idx_exprs.append(self.expr(0))
-                while self._accept("COMMA"):
-                    idx_exprs.append(self.expr(0))
-                self._expect("RP")
-            if self._accept("ARROW_L"):
-                box_e = self.expr(0)
-                return PickExpr(box_e, idx_exprs)
-            else:
-                raise SyntaxError("Expected '<-' after PICK(...), use PICK(i, j) <- box")
-
         # COUNT(a, b, ...) <- box (if applicable)
         if t.kind == "ID" and t.lex in ("COUNT", "count"):
             self._pop()  # COUNT
@@ -525,7 +509,21 @@ class Parser:
         elif t.kind == "NUM":
             left = Num(t.val)
         elif t.kind == "ID":
-            if t.lex == "TRUE":
+            # Special handling for PICK(...) <- box as prefix expression
+            if t.lex in ("PICK", "pick"):
+                self._expect("LP")
+                idx_exprs = []
+                if not self._accept("RP"):
+                    idx_exprs.append(self.expr(0))
+                    while self._accept("COMMA"):
+                        idx_exprs.append(self.expr(0))
+                    self._expect("RP")
+                if self._accept("ARROW_L"):
+                    box_e = self.expr(0)
+                    left = PickExpr(box_e, idx_exprs)
+                else:
+                    raise SyntaxError("Expected '<-' after PICK(...), use PICK(i, j) <- box")
+            elif t.lex == "TRUE":
                 left = Bool(True)
             elif t.lex == "FALSE":
                 left = Bool(False)
@@ -639,6 +637,8 @@ class Parser:
 class Env:
     def __init__(self):
         self.scopes: List[Dict[str, Any]] = [{}]
+        # Set of protected names (built-ins that cannot be redefined)
+        self._protected_names = {"box", "pack", "place", "unpack", "pick", "count", "print", "result"}
         # Built-ins in global scope (lowercase only)
         g = self.scopes[0]
         g["output"] = lambda v: self._builtin_output(v)
@@ -709,6 +709,8 @@ class Env:
         raise NameError(f"Undefined name: {name}")
 
     def set(self, name: str, val: Any) -> None:
+        if name in self._protected_names:
+            raise SyntaxError(f"Cannot redefine built-in: {name}")
         for scope in reversed(self.scopes):
             if name in scope:
                 scope[name] = val
