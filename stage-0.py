@@ -31,8 +31,9 @@ class Lexer:
         self.col = 1
         self.n = len(src)
 
-    def _peek(self) -> str:
-        return self.s[self.i] if self.i < self.n else ""
+    def _peek(self, ahead: int = 0) -> str:
+        i = self.i + ahead
+        return self.s[i] if i < self.n else ""
 
     def _adv(self) -> str:
         ch = self._peek()
@@ -69,6 +70,12 @@ class Lexer:
                 continue
             if ch == "<" and nxt == "-":
                 ts.append(Tok("ARROW_L", "<-", pos=(self.line, self.col)))
+                self._adv(); self._adv()
+                continue
+
+            # :. (STEP) token: must be above colon and dot rules
+            if ch == ":" and self._peek(1) == ".":
+                ts.append(Tok("STEP", ":.", ":.", (self.line, self.col)))
                 self._adv(); self._adv()
                 continue
 
@@ -126,8 +133,11 @@ class Lexer:
                     if c.isdigit():
                         txt += self._adv()
                     elif c == "." and not dot:
-                        dot = True
-                        txt += self._adv()
+                        if self._peek(1).isdigit():
+                            dot = True
+                            txt += self._adv()
+                        else:
+                            break
                     else:
                         break
                 val = float(txt) if "." in txt else int(txt)
@@ -252,9 +262,13 @@ class UnpackExpr:
     end: Optional[Any]  # None means single element
 
 @dataclass
+class Step:
+    index: Any
+
+@dataclass
 class PickExpr:
     box: Any
-    indices: List[Any]
+    indices: List[Any]  # mix of int and Step
 
 # ----------- Blocks and control flow ----------
 @dataclass
@@ -513,10 +527,17 @@ class Parser:
             if t.lex in ("PICK", "pick"):
                 self._expect("LP")
                 idx_exprs = []
+                # Parse first index expression, then allow STEP-prefixed step expressions
                 if not self._accept("RP"):
+                    # First index
                     idx_exprs.append(self.expr(0))
-                    while self._accept("COMMA"):
-                        idx_exprs.append(self.expr(0))
+                    # Now allow zero or more STEP-prefixed step expressions
+                    while True:
+                        if not self._accept("STEP"):
+                            break
+                        # Next must be an expression (variable, number, etc)
+                        step_expr = self.expr(0)
+                        idx_exprs.append(Step(step_expr))
                     self._expect("RP")
                 if self._accept("ARROW_L"):
                     box_e = self.expr(0)
@@ -755,6 +776,8 @@ class Func:
     def as_box(self):
         return [f"{self.env.get(p)}{p}" for p in self.params] + [self.body]
 
+last_box_context = None
+
 class Evaluator:
     def __init__(self, env: Env):
         self.env = env
@@ -913,26 +936,26 @@ class Evaluator:
                 raise TypeError("UNPACK: type")
 
         if isinstance(node, PickExpr):
-            box = self.eval(node.box)
-            if isinstance(box, Func):
-                box = box.as_box()
-            idxs = [self.eval(e) for e in node.indices]
-            # type checks for indices
-            for i in idxs:
-                if not isinstance(i, int):
-                    raise TypeError("PICK: index type")
-            if isinstance(box, list):
-                # bounds check
-                for i in idxs:
-                    if i < 0 or i >= len(box):
-                        raise IndexError("PICK: bounds")
-                return [box[i] for i in idxs]
-            if isinstance(box, str):
-                for i in idxs:
-                    if i < 0 or i >= len(box):
-                        raise IndexError("PICK: bounds")
-                return ''.join(box[i] for i in idxs)
-            raise TypeError("PICK: type")
+            expr = node
+            value = self.eval(expr.box)
+            if isinstance(value, Func):
+                value = value.as_box()
+            if not isinstance(expr.indices, list) or len(expr.indices) == 0:
+                raise TypeError("PICK: no indices provided")
+            # The first index must not be a Step
+            if isinstance(expr.indices[0], Step):
+                raise TypeError("First pick index must be head, not step")
+            index = self.eval(expr.indices[0])
+            value = value[index]
+            # For each subsequent index, must be Step
+            for step in expr.indices[1:]:
+                if not isinstance(step, Step):
+                    raise TypeError("Subsequent pick indices must be steps")
+                step_index = self.eval(step.index)
+                value = value[step_index]
+            return value
+
+        # Helper for evaluating expressions in the context of PickExpr (no longer needed)
 
         if isinstance(node, Block):
             self.env.push()
