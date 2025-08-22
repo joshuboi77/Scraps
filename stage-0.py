@@ -522,6 +522,27 @@ class Parser:
             arg = self.expr(0)
             return ExprStmt(RewireExpr(arg))
 
+        # WRITE(content) -> filename
+        if t.kind == "ID" and t.lex in ("WRITE", "write"):
+            self._pop()  # consume 'write'
+            self._expect("LP")
+            content = self.expr(0)
+            self._expect("RP")
+            if self._accept("ARROW_R"):
+                filename = self.expr(0)
+                return Call(Var("write"), [content, filename])
+            else:
+                raise SyntaxError("Expected '->' after WRITE(...), use WRITE(content) -> filename")
+
+        # READ <- filename
+        if t.kind == "ID" and t.lex in ("READ", "read"):
+            self._pop()  # consume 'read'
+            if self._accept("ARROW_L"):
+                filename = self.expr(0)
+                return Call(Var("read"), [filename])
+            else:
+                raise SyntaxError("Expected '<-' after READ, use READ <- filename")
+
         # assignment: IDENT = expr, or "string" = expr (rewired symbol)
         if t.kind == "ID" or t.kind == "STRING":
             # lookahead for '='
@@ -570,6 +591,23 @@ class Parser:
                     left = PickExpr(box_e, idx_exprs)
                 else:
                     raise SyntaxError("Expected '<-' after PICK(...), use PICK(i, j) <- box")
+            # Special handling for READ <- filename as prefix expression
+            elif t.lex in ("READ", "read"):
+                if self._accept("ARROW_L"):
+                    filename_e = self.expr(0)
+                    left = Call(Var("read"), [filename_e])
+                else:
+                    left = Var(t.lex)
+            # Special handling for WRITE(content) -> filename as prefix expression
+            elif t.lex in ("WRITE", "write"):
+                self._expect("LP")
+                content_e = self.expr(0)
+                self._expect("RP")
+                if self._accept("ARROW_R"):
+                    filename_e = self.expr(0)
+                    left = Call(Var("write"), [content_e, filename_e])
+                else:
+                    left = Var(t.lex)
             elif t.lex == "TRUE":
                 left = Bool(True)
             elif t.lex == "FALSE":
@@ -617,7 +655,7 @@ class Parser:
         while True:
             nt = self._peek()
             if nt.kind == "ARROW_L":
-                # read-from arrow, valid for UNPACK(..) and COUNT(..)
+                # read-from arrow, valid for UNPACK(..), COUNT(..), and READ
                 # only if the current left is a Call of those names (case-insensitive)
                 if (
                     isinstance(left, Call)
@@ -641,10 +679,16 @@ class Parser:
                         else:
                             left = Call(Var("COUNT"), [UnpackExpr(box_e, left.args[0], left.args[1])])
                     continue
+                # Special case for READ <- filename (when READ is used as a variable)
+                elif isinstance(left, Var) and left.name in ("READ", "read"):
+                    self._pop()  # consume '<-'
+                    filename_e = self.expr(0)
+                    left = Call(Var("read"), [filename_e])
+                    continue
                 else:
                     break  # arrow not applicable here
             elif nt.kind == "ARROW_R":
-                # write-to arrow, valid for PACK(..) and PLACE(..)
+                # write-to arrow, valid for PACK(..), PLACE(..), and WRITE
                 if isinstance(left, Call) and isinstance(left.func, Var) and left.func.name in ("PACK", "PLACE"):
                     self._pop()  # consume '->'
                     box_e = self.expr(0)
@@ -661,6 +705,10 @@ class Parser:
                         pairs = [(args[i], args[i+1]) for i in range(0, len(args), 2)]
                         left = PlaceStmt(pairs, box_e)
                     continue
+                # Special case for WRITE(content) -> filename (when WRITE is used as a variable)
+                elif isinstance(left, Var) and left.name in ("WRITE", "write"):
+                    # This would need to be handled in prefix form since WRITE needs arguments
+                    break  # arrow not applicable here
                 else:
                     break  # arrow not applicable here
             else:
@@ -687,7 +735,7 @@ class Env:
     def __init__(self):
         self.scopes: List[Dict[str, Any]] = [{}]
         # Set of protected names (built-ins that cannot be redefined)
-        self._protected_names = {"box", "pack", "place", "unpack", "pick", "count", "print", "result", "string"}
+        self._protected_names = {"box", "pack", "place", "unpack", "pick", "count", "print", "result", "string", "read", "write"}
         # Built-ins in global scope (lowercase only)
         g = self.scopes[0]
         g["output"] = lambda v: self._builtin_output(v)
@@ -702,6 +750,9 @@ class Env:
         g["pick"] = self._builtin_pick
         g["fab"] = self._builtin_fab
         g["print"] = self._builtin_print
+        # Add I/O functions
+        g["read"] = self._builtin_read
+        g["write"] = self._builtin_write
         # Set of rewired string symbols
         self._rewired_syms: set[str] = set()
 
@@ -720,11 +771,18 @@ class Env:
 
     def _builtin_print(self, *args):
         raise NotImplementedError("_builtin_print not yet implemented")
+
+    def _builtin_read(self, *args):
+        raise NotImplementedError("_builtin_read not yet implemented")
+
+    def _builtin_write(self, *args):
+        raise NotImplementedError("_builtin_write not yet implemented")
     def _builtin_fab(self, f):
         if isinstance(f, Func):
             args = [self.get(p) for p in f.params]
             return f(*args)
         raise TypeError("FAB: expects function")
+
     def _builtin_result(self, f):
         if isinstance(f, Func):
             # evaluate with captured param bindings from the closure environment
@@ -738,6 +796,9 @@ class Env:
     def _fmt(self, v):
         if isinstance(v, bool):
             return "TRUE" if v else "FALSE"
+        # Auto-condense character lists back into readable strings
+        if isinstance(v, list) and all(isinstance(c, str) and len(c) == 1 for c in v):
+            return ''.join(v)
         return v
 
     def _builtin_output(self, v):
@@ -754,6 +815,116 @@ class Env:
         if isinstance(v, bool):
             return not v
         raise TypeError("!: type")
+
+    # Built-in implementations for lowercase vocabulary
+    def _builtin_pack(self, *args):
+        # Expects last arg is the box
+        if len(args) < 1:
+            raise TypeError("pack: expects at least one argument (box)")
+        *vals, box = args
+        if not isinstance(box, list):
+            raise TypeError("pack: last argument must be a box (list)")
+        box.extend(vals)
+        return box
+
+    def _builtin_place(self, *args):
+        # expects pairs of (idx, val), then box
+        if len(args) < 1:
+            raise TypeError("place: expects at least one argument (box)")
+        box = args[-1]
+        pairs = args[:-1]
+        if not isinstance(box, list):
+            raise TypeError("place: last argument must be a box (list)")
+        if len(pairs) % 2 != 0:
+            raise TypeError("place: expects pairs of (idx, value)")
+        for i in range(0, len(pairs), 2):
+            idx = pairs[i]
+            val = pairs[i+1]
+            if not isinstance(idx, int) or idx < 0 or idx >= len(box):
+                raise IndexError("place: index out of bounds")
+            box[idx] = val
+        return box
+
+    def _builtin_unpack(self, *args):
+        # expects box, start, [end]
+        if len(args) < 2:
+            raise TypeError("unpack: expects at least 2 arguments (box, start)")
+        box = args[0]
+        start = args[1]
+        end = args[2] if len(args) > 2 else None
+        if isinstance(box, Func):
+            box = box.as_box()
+        if end is None:
+            if isinstance(box, list) or isinstance(box, str):
+                if not isinstance(start, int) or start < 0 or start >= len(box):
+                    raise IndexError("unpack: index out of bounds")
+                return box[start]
+            raise TypeError("unpack: box type")
+        else:
+            if not (isinstance(start, int) and isinstance(end, int)):
+                raise TypeError("unpack: index type")
+            if isinstance(box, list) or isinstance(box, str):
+                if start < 0 or end < start or end > len(box):
+                    raise IndexError("unpack: slice out of bounds")
+                return box[start:end]
+            raise TypeError("unpack: box type")
+
+    def _builtin_pick(self, *args):
+        # expects box, i1, i2, ...
+        if len(args) < 2:
+            raise TypeError("pick: expects at least box and one index")
+        box = args[0]
+        idxs = args[1:]
+        if isinstance(box, Func):
+            box = box.as_box()
+        for idx in idxs:
+            if not isinstance(idx, int):
+                raise TypeError("pick: index type")
+        if isinstance(box, list):
+            for idx in idxs:
+                if idx < 0 or idx >= len(box):
+                    raise IndexError("pick: index out of bounds")
+            return [box[idx] for idx in idxs]
+        if isinstance(box, str):
+            for idx in idxs:
+                if idx < 0 or idx >= len(box):
+                    raise IndexError("pick: index out of bounds")
+            return ''.join(box[idx] for idx in idxs)
+        raise TypeError("pick: box type")
+
+    def _builtin_print(self, v):
+        print(self._fmt(v))
+        return v
+
+    def _builtin_read(self, filename):
+        """Read content from a file and return it as a string"""
+        try:
+            # Convert filename from list of chars to string if needed
+            if isinstance(filename, list):
+                filename = ''.join(filename)
+            with open(filename, 'r', encoding='utf-8') as f:
+                content = f.read()
+                # Return as list of characters to match language semantics
+                return list(content)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"File not found: {filename}")
+        except Exception as e:
+            raise RuntimeError(f"Error reading file {filename}: {e}")
+
+    def _builtin_write(self, content, filename):
+        """Write content to a file"""
+        try:
+            # Convert filename from list of chars to string if needed
+            if isinstance(filename, list):
+                filename = ''.join(filename)
+            # Convert content to string if it's a list of characters
+            if isinstance(content, list):
+                content = ''.join(content)
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(str(content))
+            return content
+        except Exception as e:
+            raise RuntimeError(f"Error writing to file {filename}: {e}")
 
     def get(self, name: str) -> Any:
         # No implicit case transformation or fallback to uppercase
@@ -1099,7 +1270,7 @@ class Evaluator:
 # REPL / Runner
 # ----------------------------
 
-BANNER = "scraps-lang stage-0 | ops: + - * / = < > <= >= == !=  >|  |<  ! | bools: TRUE/FALSE | control: { }, IF/ELSE, WHILE | verbs: PACK(...) -> box, PLACE(...) -> box, UNPACK(a, b) <- box, PICK(i, ...) <- box | identifiers: UTF-8 | () grouping | newline-terminated"
+BANNER = "scraps-lang stage-0 | ops: + - * / = < > <= >= == !=  >|  |<  ! | bools: TRUE/FALSE | control: { }, IF/ELSE, WHILE | verbs: PACK(...) -> box, PLACE(...) -> box, UNPACK(a, b) <- box, PICK(i, ...) <- box | I/O: WRITE(content) -> filename, READ <- filename | identifiers: UTF-8 | () grouping | newline-terminated"
 
 EXAMPLE = '''
 # examples:
@@ -1115,6 +1286,12 @@ PLACE(1: 9, 0: 7) -> box
 PRINT box             # [7, 9, 3]
 PRINT TRUE            # TRUE
 TEST (1 < 2)          # TRUE
+
+# I/O functions with arrow syntax:
+WRITE("Hello World!") -> "file.txt"    # writes "Hello World!" to file.txt
+content = READ <- "file.txt"           # reads content from file.txt
+PRINT content                          # prints the file content
+
 # String literal and PRINT as code:
 # PRINT "1 + 2"        # prints 3
 # PRINT "PRINT 4 + 5"  # prints 9, then None
@@ -1207,87 +1384,3 @@ if __name__ == "__main__":
         with open(sys.argv[1], "r", encoding="utf-8") as f:
             src = f.read()
         run_source(src)
-    def _builtin_fab(self, f):
-        if isinstance(f, Func):
-            args = [self.get(p) for p in f.params]
-            return f(*args)
-        raise TypeError("FAB: expects function")
-    # Built-in implementations for lowercase vocabulary
-    def _builtin_pack(self, *args):
-        # Expects last arg is the box
-        if len(args) < 1:
-            raise TypeError("pack: expects at least one argument (box)")
-        *vals, box = args
-        if not isinstance(box, list):
-            raise TypeError("pack: last argument must be a box (list)")
-        box.extend(vals)
-        return box
-
-    def _builtin_place(self, *args):
-        # expects pairs of (idx, val), then box
-        if len(args) < 1:
-            raise TypeError("place: expects at least one argument (box)")
-        box = args[-1]
-        pairs = args[:-1]
-        if not isinstance(box, list):
-            raise TypeError("place: last argument must be a box (list)")
-        if len(pairs) % 2 != 0:
-            raise TypeError("place: expects pairs of (idx, value)")
-        for i in range(0, len(pairs), 2):
-            idx = pairs[i]
-            val = pairs[i+1]
-            if not isinstance(idx, int) or idx < 0 or idx >= len(box):
-                raise IndexError("place: index out of bounds")
-            box[idx] = val
-        return box
-
-    def _builtin_unpack(self, *args):
-        # expects box, start, [end]
-        if len(args) < 2:
-            raise TypeError("unpack: expects at least 2 arguments (box, start)")
-        box = args[0]
-        start = args[1]
-        end = args[2] if len(args) > 2 else None
-        if isinstance(box, Func):
-            box = box.as_box()
-        if end is None:
-            if isinstance(box, list) or isinstance(box, str):
-                if not isinstance(start, int) or start < 0 or start >= len(box):
-                    raise IndexError("unpack: index out of bounds")
-                return box[start]
-            raise TypeError("unpack: box type")
-        else:
-            if not (isinstance(start, int) and isinstance(end, int)):
-                raise TypeError("unpack: index type")
-            if isinstance(box, list) or isinstance(box, str):
-                if start < 0 or end < start or end > len(box):
-                    raise IndexError("unpack: slice out of bounds")
-                return box[start:end]
-            raise TypeError("unpack: box type")
-
-    def _builtin_pick(self, *args):
-        # expects box, i1, i2, ...
-        if len(args) < 2:
-            raise TypeError("pick: expects at least box and one index")
-        box = args[0]
-        idxs = args[1:]
-        if isinstance(box, Func):
-            box = box.as_box()
-        for idx in idxs:
-            if not isinstance(idx, int):
-                raise TypeError("pick: index type")
-        if isinstance(box, list):
-            for idx in idxs:
-                if idx < 0 or idx >= len(box):
-                    raise IndexError("pick: index out of bounds")
-            return [box[idx] for idx in idxs]
-        if isinstance(box, str):
-            for idx in idxs:
-                if idx < 0 or idx >= len(box):
-                    raise IndexError("pick: index out of bounds")
-            return ''.join(box[idx] for idx in idxs)
-        raise TypeError("pick: box type")
-
-    def _builtin_print(self, v):
-        print(self._fmt(v))
-        return v
