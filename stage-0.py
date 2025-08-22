@@ -195,10 +195,14 @@ class Lexer:
 class Num:
     value: Any
 
-# String literal node
 @dataclass
 class Str:
     value: str
+
+# Rewire expression node
+@dataclass
+class RewireExpr:
+    arg: Any
 
 # Boolean literal node
 @dataclass
@@ -285,6 +289,13 @@ class IfExpr:
 class WhileStmt:
     cond: Any
     body: Any  # Block
+
+# ----------- Rewire block for mutable operations ----------
+@dataclass
+class RewireBlock:
+    target: str          # The variable to make mutable
+    body: Block          # The block of operations
+    destination: str     # Where to store the function
 
 # ----------------------------
 # Parser (Pratt-style for precedence, no parentheses in MVP)
@@ -493,26 +504,41 @@ class Parser:
                 return Assign(dest, func)
             return func
 
-        # REWIRE b = expr
+        # REWIRE variable { ... } -> destination
         if t.kind == "ID" and t.lex in ("REWIRE", "rewire"):
             self._pop()  # consume 'rewire'
-            name_tok = self._expect("ID")
-            self._expect("OP", "=")
-            expr = self.expr(0)
-            node = Assign(name_tok.lex, expr)
-            node._rewire = True  # mark as rewire
-            return node
+            target = self._expect("ID").lex
+            body = self._block()
+            if self._accept("ARROW_R"):
+                dest = self._expect("ID").lex
+                return RewireBlock(target, body, dest)
+            else:
+                raise SyntaxError("Expected '->' after rewire block")
 
-        # assignment: IDENT = expr
-        if t.kind == "ID":
+        # REWIRE "symbol" (legacy syntax)
+        if t.kind == "ID" and t.lex in ("REWIRE_LEGACY", "rewire_legacy"):
+            self._pop()  # consume 'rewire_legacy'
+            # Accept a string literal after rewire (rewire "symbol")
+            arg = self.expr(0)
+            return ExprStmt(RewireExpr(arg))
+
+        # assignment: IDENT = expr, or "string" = expr (rewired symbol)
+        if t.kind == "ID" or t.kind == "STRING":
             # lookahead for '='
             if self.ts[self.i+1].kind == "OP" and self.ts[self.i+1].lex == "=":
-                name = self._pop().lex
+                lhs = self._pop()
                 self._expect("OP", "=")
                 e = self.expr(0)
-                return Assign(name, e)
+                # If LHS is STRING, treat as rewired symbol variable assignment
+                if lhs.kind == "STRING":
+                    # Assign to Var(symbol) instead of Str
+                    return Assign(lhs.val, e)
+                else:
+                    return Assign(lhs.lex, e)
         # otherwise expression statement
         e = self.expr(0)
+        # If the expression is a string literal and matches a rewired symbol, treat as Var
+        # (handled in evaluator, since parser doesn't know rewired names)
         return ExprStmt(e)
 
     def expr(self, min_bp: int) -> Any:
@@ -548,6 +574,8 @@ class Parser:
                 left = Bool(True)
             elif t.lex == "FALSE":
                 left = Bool(False)
+            elif t.lex == "string":
+                left = Str("")  # Empty string
             elif t.lex.lower() == "result":
                 # support `result(x)` as special syntax for calling RESULT
                 if self._accept("LP"):
@@ -659,7 +687,7 @@ class Env:
     def __init__(self):
         self.scopes: List[Dict[str, Any]] = [{}]
         # Set of protected names (built-ins that cannot be redefined)
-        self._protected_names = {"box", "pack", "place", "unpack", "pick", "count", "print", "result"}
+        self._protected_names = {"box", "pack", "place", "unpack", "pick", "count", "print", "result", "string"}
         # Built-ins in global scope (lowercase only)
         g = self.scopes[0]
         g["output"] = lambda v: self._builtin_output(v)
@@ -674,6 +702,8 @@ class Env:
         g["pick"] = self._builtin_pick
         g["fab"] = self._builtin_fab
         g["print"] = self._builtin_print
+        # Set of rewired string symbols
+        self._rewired_syms: set[str] = set()
 
     # Stub definitions for built-in methods (for Pylance, etc.)
     def _builtin_pack(self, *args):
@@ -700,6 +730,9 @@ class Env:
             # evaluate with captured param bindings from the closure environment
             args = [f.env.get(p) for p in f.params]
             return f(*args)
+        elif hasattr(f, '__call__'):
+            # Handle callable objects like RewireFunc
+            return f()
         raise TypeError("RESULT: expects function")
 
     def _fmt(self, v):
@@ -781,6 +814,9 @@ last_box_context = None
 class Evaluator:
     def __init__(self, env: Env):
         self.env = env
+        # Map from rewired symbol names (string) to Var names
+        if not hasattr(self.env, "_rewired_syms"):
+            self.env._rewired_syms = set()
 
     def eval_prog(self, items: List[Any]) -> Optional[Any]:
         last = None
@@ -793,7 +829,8 @@ class Evaluator:
         if isinstance(node, Num):
             return node.value
         if isinstance(node, Str):
-            return node.value
+            # Turn string literal into a list of characters (a box)
+            return list(node.value)
         if isinstance(node, Bool):
             return node.value
         if isinstance(node, Var):
@@ -834,14 +871,12 @@ class Evaluator:
             if op == "!=": return a != b
             raise RuntimeError(f"unknown op {op}")
         if isinstance(node, Assign):
+            # If LHS is a rewired symbol (i.e., string), treat as Var
             value = self.eval(node.expr)
-            if getattr(node, "_rewire", False):
-                # New logic for rewired variables:
-                if node.name in self.env.scopes[-1]:
-                    self.env.scopes[-1][node.name] = value
-                    print(f"[DEBUG] Rewired {node.name} = {value}")
-                else:
-                    raise RuntimeError(f"Cannot rewire undefined name: {node.name}")
+            rewired = hasattr(self.env, "_rewired_syms") and node.name in self.env._rewired_syms
+            if rewired:
+                self.env.set(node.name, value)
+                print(f"[DEBUG] Assign (rewired) {node.name} = {value} (from expr: {node.expr})")
             else:
                 self.env.set(node.name, value)
                 print(f"[DEBUG] Assign {node.name} = {value} (from expr: {node.expr})")
@@ -850,6 +885,11 @@ class Evaluator:
             # If printing a string literal, treat its contents as a code snippet:
             # evaluate it in the *same* environment and print the resulting value.
             if isinstance(node.expr, Str):
+                # If this is a rewired symbol, print its value
+                if hasattr(self.env, "_rewired_syms") and node.expr.value in self.env._rewired_syms:
+                    v = self.env.get(node.expr.value)
+                    print(self.env._fmt(v))
+                    return v
                 src = node.expr.value
                 # Ensure the snippet ends with a newline so the parser sees a complete unit
                 res = run_source(src + "\n", self.env)
@@ -859,6 +899,63 @@ class Evaluator:
                 v = self.eval(node.expr)
                 print(self.env._fmt(v))
                 return v
+        if isinstance(node, RewireExpr):
+            # Only allow rewiring string literals
+            argval = None
+            if isinstance(node.arg, Str):
+                argval = node.arg.value
+            elif isinstance(node.arg, Var):
+                # Allow rewire foo (treat as Var("foo")), but not recommended
+                argval = node.arg.name
+            else:
+                raise SyntaxError("rewire expects a string literal or identifier")
+            # Insert into rewired symbol table
+            if not hasattr(self.env, "_rewired_syms"):
+                self.env._rewired_syms = set()
+            self.env._rewired_syms.add(argval)
+            # Optionally, initialize in environment if not present
+            if argval not in self.env.scopes[-1]:
+                self.env.scopes[-1][argval] = None
+            print(f"[DEBUG] Symbol rewired: '{argval}' (future uses of \"{argval}\" will refer to Var('{argval}'))")
+            return None
+
+        if isinstance(node, RewireBlock):
+            # Capture the current value of the target variable
+            captured_value = self.env.get(node.target)
+            
+            # Create a proper Func object that can modify the captured value
+            class RewireFunc:
+                def __init__(self, target, body, env, captured_value):
+                    self.target = target
+                    self.body = body
+                    self.env = env
+                    self.captured_value = captured_value
+                
+                def __call__(self):
+                    # Create new environment for the rewire block
+                    rewire_env = Env()
+                    rewire_env.scopes = [scope.copy() for scope in self.env.scopes]
+                    
+                    # Set the target variable in the rewire environment
+                    rewire_env.set(self.target, self.captured_value)
+                    
+                    # Execute the rewire block
+                    evaluator = Evaluator(rewire_env)
+                    result = evaluator.eval(self.body)
+                    
+                    # Update the original variable with the modified value
+                    self.env.set(self.target, rewire_env.get(self.target))
+                    
+                    return result
+                
+                def as_box(self):
+                    # Make it compatible with existing box operations
+                    return [self.target, self.body]
+            
+            # Create and store the rewire function
+            rewire_func = RewireFunc(node.target, node.body, self.env, captured_value)
+            self.env.set(node.destination, rewire_func)
+            return rewire_func
         if isinstance(node, TestStmt):
             v = self.eval(node.expr)
             # Treat truthy strictly as boolean True/False
@@ -889,9 +986,18 @@ class Evaluator:
             box = self.eval(node.box)
             if not isinstance(box, list):
                 raise TypeError("PACK: type")
-            vals = [self.eval(v) for v in node.values]
-            print(f"[DEBUG] PACK -> {box} with {vals}")
-            box.extend(vals)
+            
+            # Expand string values into individual characters
+            expanded_values = []
+            for v in node.values:
+                val = self.eval(v)
+                if isinstance(val, list):  # If it's already a list (like a string)
+                    expanded_values.extend(val)  # Add each character individually
+                else:
+                    expanded_values.append(val)
+            
+            print(f"[DEBUG] PACK -> {box} with {expanded_values}")
+            box.extend(expanded_values)
             return box
 
         if isinstance(node, PlaceStmt):
@@ -899,11 +1005,15 @@ class Evaluator:
             if not isinstance(box, list):
                 raise TypeError("PLACE: type")
             for idx_e, val_e in node.pairs:
-                i = self.eval(idx_e)
+                index = self.eval(idx_e)
+                target = box
                 v = self.eval(val_e)
-                if not isinstance(i, int) or i < 0 or i >= len(box):
+                # Improved debug logging for index and target before bounds checking
+                print(f"[DEBUG] PLACE index={index}, target={target}")
+                if not isinstance(index, int) or index < 0 or index >= len(target):
+                    print(f"[DEBUG] PLACE bounds error: index={index}, target={target}, target_len={len(target) if hasattr(target, '__len__') else 'N/A'}")
                     raise IndexError("PLACE: bounds")
-                box[i] = v
+                target[index] = v
             return box
 
         if isinstance(node, UnpackExpr):
@@ -1024,6 +1134,15 @@ WHILE (i < 3) {
 }
 PRINT box            # [1, 2, 3, 0, 1, 2] if run after earlier PACKs; or [0,1,2] fresh
 PRINT (IF TRUE { 42 } ELSE { 0 })   # 42
+
+# Rewire block demo (mutable strings):
+x = string                    # x = []
+rewire x {                    # Make x mutable within this block
+    pack("Hello World") -> x  # Pack characters into x
+    unpack(0) <- x            # Extract first character
+} -> y                        # y stores the rewire function
+PRINT result(y)               # Should print [H]
+PRINT x                       # x should now be ['H', 'e', 'l', 'l', 'o', ' ', 'W', 'o', 'r', 'l', 'd']
 '''.strip()
 
 def run_source(src: str, env: Optional[Env]=None) -> Any:
