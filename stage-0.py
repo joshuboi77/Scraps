@@ -14,7 +14,7 @@ import sys
 # ----------------------------
 
 OPERATORS = {"+", "-", "*", "/", "=", "<", ">", "!=", "<=", ">=", "==", ">|", "|<", "!"}
-GROUPERS = {"(": "LP", ")": "RP", "{": "LC", "}": "RC"}
+GROUPERS = {"(": "LP", ")": "RP", "{": "LC", "}": "RC", "[": "LB", "]": "RB"}
 
 @dataclass
 class Tok:
@@ -274,6 +274,10 @@ class PickExpr:
     box: Any
     indices: List[Any]  # mix of int and Step
 
+@dataclass
+class ListLiteral:
+    elements: List[Any]
+
 # ----------- Blocks and control flow ----------
 @dataclass
 class Block:
@@ -344,6 +348,17 @@ class Parser:
             args.append(self.expr(0))
         self._expect("RP")
         return args
+
+    def _parse_list(self) -> ListLiteral:
+        """Parse a list literal [expr1, expr2, ...]"""
+        self._expect("LB")  # consume '['
+        elements: List[Any] = []
+        if not self._accept("RB"):  # if not empty list
+            elements.append(self.expr(0))
+            while self._accept("COMMA"):
+                elements.append(self.expr(0))
+            self._expect("RB")
+        return ListLiteral(elements)
 
     def _expect_id(self, name: str) -> Tok:
         t = self._expect("ID")
@@ -543,6 +558,30 @@ class Parser:
             else:
                 raise SyntaxError("Expected '<-' after READ, use READ <- filename")
 
+        # FISSION(delimiter) <- string
+        if t.kind == "ID" and t.lex in ("FISSION", "fission"):
+            self._pop()  # consume 'fission'
+            self._expect("LP")
+            delimiter = self.expr(0)
+            self._expect("RP")
+            if self._accept("ARROW_L"):
+                string_expr = self.expr(0)
+                return Call(Var("fission"), [delimiter, string_expr])
+            else:
+                raise SyntaxError("Expected '<-' after FISSION(...), use FISSION(delimiter) <- string")
+
+        # FUSION(delimiter) -> strings
+        if t.kind == "ID" and t.lex in ("FUSION", "fusion"):
+            self._pop()  # consume 'fusion'
+            self._expect("LP")
+            delimiter = self.expr(0)
+            self._expect("RP")
+            if self._accept("ARROW_R"):
+                strings_expr = self.expr(0)
+                return Call(Var("fusion"), [delimiter, strings_expr])
+            else:
+                raise SyntaxError("Expected '->' after FUSION(...), use FUSION(delimiter) -> strings")
+
         # assignment: IDENT = expr, or "string" = expr (rewired symbol)
         if t.kind == "ID" or t.kind == "STRING":
             # lookahead for '='
@@ -608,6 +647,26 @@ class Parser:
                     left = Call(Var("write"), [content_e, filename_e])
                 else:
                     left = Var(t.lex)
+            # Special handling for FISSION(delimiter) <- string as prefix expression
+            elif t.lex in ("FISSION", "fission"):
+                self._expect("LP")
+                delimiter_e = self.expr(0)
+                self._expect("RP")
+                if self._accept("ARROW_L"):
+                    string_e = self.expr(0)
+                    left = Call(Var("fission"), [delimiter_e, string_e])
+                else:
+                    left = Var(t.lex)
+            # Special handling for FUSION(delimiter) -> strings as prefix expression
+            elif t.lex in ("FUSION", "fusion"):
+                self._expect("LP")
+                delimiter_e = self.expr(0)
+                self._expect("RP")
+                if self._accept("ARROW_R"):
+                    strings_e = self.expr(0)
+                    left = Call(Var("fusion"), [delimiter_e, strings_e])
+                else:
+                    left = Var(t.lex)
             elif t.lex == "TRUE":
                 left = Bool(True)
             elif t.lex == "FALSE":
@@ -644,6 +703,10 @@ class Parser:
         elif t.kind == "LP":
             left = self.expr(0)
             self._expect("RP")
+        elif t.kind == "LB":
+            # List literal
+            self.i -= 1  # put back the '[' token
+            left = self._parse_list()
         elif t.kind == "LC":
             # already consumed LC in t; put it back by stepping index back by one and call _block()
             self.i -= 1
@@ -735,7 +798,7 @@ class Env:
     def __init__(self):
         self.scopes: List[Dict[str, Any]] = [{}]
         # Set of protected names (built-ins that cannot be redefined)
-        self._protected_names = {"box", "pack", "place", "unpack", "pick", "count", "print", "result", "string", "read", "write"}
+        self._protected_names = {"box", "pack", "place", "unpack", "pick", "count", "print", "result", "string", "read", "write", "fission", "fusion"}
         # Built-ins in global scope (lowercase only)
         g = self.scopes[0]
         g["output"] = lambda v: self._builtin_output(v)
@@ -753,6 +816,9 @@ class Env:
         # Add I/O functions
         g["read"] = self._builtin_read
         g["write"] = self._builtin_write
+        # Add string operations
+        g["fission"] = self._builtin_fission
+        g["fusion"] = self._builtin_fusion
         # Set of rewired string symbols
         self._rewired_syms: set[str] = set()
 
@@ -777,6 +843,13 @@ class Env:
 
     def _builtin_write(self, *args):
         raise NotImplementedError("_builtin_write not yet implemented")
+    
+    def _builtin_fission(self, *args):
+        raise NotImplementedError("_builtin_fission not yet implemented")
+    
+    def _builtin_fusion(self, *args):
+        raise NotImplementedError("_builtin_fusion not yet implemented")
+    
     def _builtin_fab(self, f):
         if isinstance(f, Func):
             args = [self.get(p) for p in f.params]
@@ -797,8 +870,14 @@ class Env:
         if isinstance(v, bool):
             return "TRUE" if v else "FALSE"
         # Auto-condense character lists back into readable strings
-        if isinstance(v, list) and all(isinstance(c, str) and len(c) == 1 for c in v):
-            return ''.join(v)
+        if isinstance(v, list):
+            # First, recursively format each element
+            formatted_elements = [self._fmt(elem) for elem in v]
+            # Then check if this is a character list that should be condensed
+            if all(isinstance(c, str) and len(c) == 1 for c in v):
+                return ''.join(v)
+            # Otherwise return the list with formatted elements
+            return formatted_elements
         return v
 
     def _builtin_output(self, v):
@@ -926,6 +1005,51 @@ class Env:
         except Exception as e:
             raise RuntimeError(f"Error writing to file {filename}: {e}")
 
+    def _builtin_fission(self, delimiter, string):
+        """Split a string by delimiter and return a list of substrings"""
+        try:
+            # Convert inputs to proper types if needed
+            if isinstance(delimiter, list):
+                delimiter = ''.join(delimiter)
+            if isinstance(string, list):
+                string = ''.join(string)
+            
+            if not isinstance(delimiter, str) or not isinstance(string, str):
+                raise TypeError("fission: expects string arguments")
+            
+            # Split the string and return as list of character lists
+            result = string.split(delimiter)
+            return [list(part) for part in result]
+        except Exception as e:
+            raise RuntimeError(f"Error in fission operation: {e}")
+
+    def _builtin_fusion(self, delimiter, strings):
+        """Join a list of strings with delimiter and return the result"""
+        try:
+            # Convert delimiter to string if needed
+            if isinstance(delimiter, list):
+                delimiter = ''.join(delimiter)
+            
+            if not isinstance(delimiter, str):
+                raise TypeError("fusion: delimiter must be a string")
+            
+            if not isinstance(strings, list):
+                raise TypeError("fusion: second argument must be a list")
+            
+            # Convert each string part from list of chars to string
+            string_parts = []
+            for part in strings:
+                if isinstance(part, list):
+                    string_parts.append(''.join(part))
+                else:
+                    string_parts.append(str(part))
+            
+            # Join with delimiter and return as list of characters
+            result = delimiter.join(string_parts)
+            return list(result)
+        except Exception as e:
+            raise RuntimeError(f"Error in fusion operation: {e}")
+
     def get(self, name: str) -> Any:
         # No implicit case transformation or fallback to uppercase
         for scope in reversed(self.scopes):
@@ -996,7 +1120,7 @@ class Evaluator:
         return last
 
     def eval(self, node: Any) -> Any:
-        print(f"[DEBUG] Evaluating node type: {type(node).__name__}")
+        # print(f"[DEBUG] Evaluating node type: {type(node).__name__}")
         if isinstance(node, Num):
             return node.value
         if isinstance(node, Str):
@@ -1050,7 +1174,7 @@ class Evaluator:
                 print(f"[DEBUG] Assign (rewired) {node.name} = {value} (from expr: {node.expr})")
             else:
                 self.env.set(node.name, value)
-                print(f"[DEBUG] Assign {node.name} = {value} (from expr: {node.expr})")
+                # print(f"[DEBUG] Assign {node.name} = {value} (from expr: {node.expr})")
             return value
         if isinstance(node, PrintStmt):
             # If printing a string literal, treat its contents as a code snippet:
@@ -1087,7 +1211,7 @@ class Evaluator:
             # Optionally, initialize in environment if not present
             if argval not in self.env.scopes[-1]:
                 self.env.scopes[-1][argval] = None
-            print(f"[DEBUG] Symbol rewired: '{argval}' (future uses of \"{argval}\" will refer to Var('{argval}'))")
+            # print(f"[DEBUG] Symbol rewired: '{argval}' (future uses of \"{argval}\" will refer to Var('{argval}'))")
             return None
 
         if isinstance(node, RewireBlock):
@@ -1139,13 +1263,13 @@ class Evaluator:
             # Store function as Func object in the environment
             fn = Func(node.name, node.params, node.body, self.env)
             self.env.set(node.name, fn)  # ensure function is stored for external visibility
-            print(f"[DEBUG] Defined function {node.name}({', '.join(node.params)})")
+            # print(f"[DEBUG] Defined function {node.name}({', '.join(node.params)})")
             return fn
         if isinstance(node, Call):
             fn = self.eval(node.func)
             # Evaluate arguments for debug print (but don't double-evaluate for call)
             debug_args = [self.eval(arg) for arg in node.args]
-            print(f"[DEBUG] Calling function {fn} with args {debug_args}")
+            # print(f"[DEBUG] Calling function {fn} with args {debug_args}")
             # Actually pass already-evaluated args to fn
             # To avoid double evaluation, reuse debug_args
             args = debug_args
@@ -1167,7 +1291,7 @@ class Evaluator:
                 else:
                     expanded_values.append(val)
             
-            print(f"[DEBUG] PACK -> {box} with {expanded_values}")
+            # print(f"[DEBUG] PACK -> {box} with {expanded_values}")
             box.extend(expanded_values)
             return box
 
@@ -1180,9 +1304,9 @@ class Evaluator:
                 target = box
                 v = self.eval(val_e)
                 # Improved debug logging for index and target before bounds checking
-                print(f"[DEBUG] PLACE index={index}, target={target}")
+                # print(f"[DEBUG] PLACE index={index}, target={target}")
                 if not isinstance(index, int) or index < 0 or index >= len(target):
-                    print(f"[DEBUG] PLACE bounds error: index={index}, target={target}, target_len={len(target) if hasattr(target, '__len__') else 'N/A'}")
+                    # print(f"[DEBUG] PLACE bounds error: index={index}, target={target}, target_len={len(target) if hasattr(target, '__len__') else 'N/A'}")
                     raise IndexError("PLACE: bounds")
                 target[index] = v
             return box
@@ -1236,6 +1360,11 @@ class Evaluator:
                 value = value[step_index]
             return value
 
+        if isinstance(node, ListLiteral):
+            # Evaluate each element in the list
+            elements = [self.eval(elem) for elem in node.elements]
+            return elements
+
         # Helper for evaluating expressions in the context of PickExpr (no longer needed)
 
         if isinstance(node, Block):
@@ -1270,7 +1399,7 @@ class Evaluator:
 # REPL / Runner
 # ----------------------------
 
-BANNER = "scraps-lang stage-0 | ops: + - * / = < > <= >= == !=  >|  |<  ! | bools: TRUE/FALSE | control: { }, IF/ELSE, WHILE | verbs: PACK(...) -> box, PLACE(...) -> box, UNPACK(a, b) <- box, PICK(i, ...) <- box | I/O: WRITE(content) -> filename, READ <- filename | identifiers: UTF-8 | () grouping | newline-terminated"
+BANNER = "scraps-lang stage-0 | ops: + - * / = < > <= >= == !=  >|  |<  ! | bools: TRUE/FALSE | control: { }, IF/ELSE, WHILE | verbs: PACK(...) -> box, PLACE(...) -> box, UNPACK(a, b) <- box, PICK(i, ...) <- box | I/O: WRITE(content) -> filename, READ <- filename | strings: FISSION(delimiter) <- string, FUSION(delimiter) -> strings | identifiers: UTF-8 | () grouping | newline-terminated"
 
 EXAMPLE = '''
 # examples:
@@ -1320,6 +1449,14 @@ rewire x {                    # Make x mutable within this block
 } -> y                        # y stores the rewire function
 PRINT result(y)               # Should print [H]
 PRINT x                       # x should now be ['H', 'e', 'l', 'l', 'o', ' ', 'W', 'o', 'r', 'l', 'd']
+
+# String operations demo:
+source = "Hello World Test"
+words = FISSION(" ") <- source
+PRINT words                    # [['H','e','l','l','o'], ['W','o','r','l','d'], ['T','e','s','t']]
+
+joined = FUSION("-") -> words
+PRINT joined                   # ['H','e','l','l','o','-','W','o','r','l','d','-','T','e','s','t']
 '''.strip()
 
 def run_source(src: str, env: Optional[Env]=None) -> Any:
