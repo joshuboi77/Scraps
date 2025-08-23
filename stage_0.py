@@ -9,6 +9,13 @@ from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple, Dict
 import sys
 
+# Try to import enhanced error handling (optional)
+try:
+    from errors import ErrorLogger, create_syntax_error, create_type_error, create_runtime_error
+    ENHANCED_ERRORS_AVAILABLE = True
+except ImportError:
+    ENHANCED_ERRORS_AVAILABLE = False
+
 # ----------------------------
 # Tokenization
 # ----------------------------
@@ -1005,9 +1012,15 @@ class Env:
         except Exception as e:
             raise RuntimeError(f"Error writing to file {filename}: {e}")
 
-    def _builtin_fission(self, delimiter, string):
+    def _builtin_fission(self, *args):
         """Split a string by delimiter and return a list of substrings"""
         try:
+            # Extract delimiter and string from args
+            if len(args) != 2:
+                raise TypeError("fission: expects exactly 2 arguments (delimiter, string)")
+            
+            delimiter, string = args
+            
             # Convert inputs to proper types if needed
             if isinstance(delimiter, list):
                 delimiter = ''.join(delimiter)
@@ -1023,9 +1036,15 @@ class Env:
         except Exception as e:
             raise RuntimeError(f"Error in fission operation: {e}")
 
-    def _builtin_fusion(self, delimiter, strings):
+    def _builtin_fusion(self, *args):
         """Join a list of strings with delimiter and return the result"""
         try:
+            # Extract delimiter and strings from args
+            if len(args) != 2:
+                raise TypeError("fusion: expects exactly 2 arguments (delimiter, strings)")
+            
+            delimiter, strings = args
+            
             # Convert delimiter to string if needed
             if isinstance(delimiter, list):
                 delimiter = ''.join(delimiter)
@@ -1461,15 +1480,153 @@ PRINT joined                   # ['H','e','l','l','o','-','W','o','r','l','d','-
 
 def run_source(src: str, env: Optional[Env]=None) -> Any:
     env = env or Env()
-    # preload nothing except allowing users to assign PRINT if they want; here PRINT is a statement, not a variable
-    lex = Lexer(src)
-    toks = lex.tokens()
-    parser = Parser(toks)
-    prog = parser.parse()
-    ev = Evaluator(env)
-    return ev.eval_prog(prog)
+    
+    if ENHANCED_ERRORS_AVAILABLE:
+        # Use enhanced error handling
+        error_logger = ErrorLogger(src)
+        
+        try:
+            # Phase 1: Lexical Analysis
+            lex = Lexer(src)
+            toks = lex.tokens()
+        except Exception as e:
+            # Extract line/column info from error message
+            line, col = _extract_position_from_error(str(e))
+            suggestion = _get_lexical_suggestion(str(e))
+            error_logger.log_error(create_syntax_error(
+                message=f"Lexical error: {str(e)}",
+                line=line, column=col,
+                context="Tokenization phase",
+                suggestion=suggestion
+            ))
+            error_logger.print_summary()
+            return None  # Don't re-raise, just return None
+        
+        try:
+            # Phase 2: Parsing
+            parser = Parser(toks)
+            prog = parser.parse()
+        except Exception as e:
+            line, col = _extract_position_from_error(str(e))
+            suggestion = _get_parsing_suggestion(str(e))
+            error_logger.log_error(create_syntax_error(
+                message=f"Parsing error: {str(e)}",
+                line=line, column=col,
+                context="Parsing phase",
+                suggestion=suggestion
+            ))
+            error_logger.print_summary()
+            return None  # Don't re-raise, just return None
+        
+        try:
+            # Phase 3: Evaluation
+            ev = Evaluator(env)
+            return ev.eval_prog(prog)
+        except Exception as e:
+            # For runtime errors, try to get more context about where they occur
+            line, col = _extract_position_from_error(str(e))
+            suggestion = _get_runtime_suggestion(str(e), src, line)
+            error_logger.log_error(create_runtime_error(
+                message=f"Runtime error: {str(e)}",
+                line=line, column=col,
+                operation="Program execution",
+                context="Evaluation phase",
+                suggestion=suggestion
+            ))
+            error_logger.print_summary()
+            return None  # Don't re-raise, just return None
+    else:
+        # Fallback to basic error handling if enhanced errors not available
+        lex = Lexer(src)
+        toks = lex.tokens()
+        parser = Parser(toks)
+        prog = parser.parse()
+        ev = Evaluator(env)
+        return ev.eval_prog(prog)
 
+def _extract_position_from_error(error_msg: str) -> tuple[int, int]:
+    """Try to extract line/column from error message"""
+    try:
+        if "at" in error_msg and ":" in error_msg:
+            parts = error_msg.split("at")[-1].strip().split(":")
+            if len(parts) == 2:
+                return int(parts[0]), int(parts[1])
+    except:
+        pass
+    return 1, 1
 
+def _get_lexical_suggestion(error_msg: str) -> str:
+    """Get specific suggestion for lexical errors"""
+    error_lower = error_msg.lower()
+    
+    if "'" in error_msg or '"' in error_msg:
+        return "Use double quotes for strings: \"hello\" instead of 'hello'"
+    elif "unexpected character" in error_lower:
+        return "Check for invalid characters or use proper Scraps syntax"
+    elif "unterminated" in error_lower:
+        return "Check for missing quotes, parentheses, or braces"
+    else:
+        return "Check for invalid characters or syntax"
+
+def _get_parsing_suggestion(error_msg: str) -> str:
+    """Get specific suggestion for parsing errors"""
+    error_lower = error_msg.lower()
+    
+    if "expected" in error_lower and "got" in error_lower:
+        return "Check syntax and ensure all statements are properly terminated"
+    elif "unexpected" in error_lower:
+        return "Verify operator precedence and statement structure"
+    elif "missing" in error_lower:
+        return "Add missing tokens like semicolons, braces, or parentheses"
+    else:
+        return "Check syntax and ensure all statements are properly terminated"
+
+def _get_runtime_suggestion(error_msg: str, source_code: str = "", line: int = 1) -> str:
+    """Get specific suggestion for runtime errors with context from source code"""
+    error_lower = error_msg.lower()
+    source_lines = source_code.split('\n')
+    
+    if "unsupported operand type" in error_lower:
+        if "+" in error_msg:
+            if "int" in error_msg and "list" in error_msg:
+                return "Convert string to number: x = 5 + int(\"123\") or use string concatenation"
+            elif "int" in error_msg and "str" in error_msg:
+                return "Convert string to number: x = 5 + int(\"123\") or use string concatenation"
+            else:
+                return "Ensure both operands are compatible types for addition"
+        elif "*" in error_msg:
+            return "Multiplication requires numeric types. Check variable types before operation"
+        elif "/" in error_msg:
+            return "Division requires numeric types. Check variable types before operation"
+        else:
+            return "Check that both operands have compatible types for this operation"
+    
+    elif "undefined name" in error_lower:
+        # Look at the actual line where the error occurred
+        if 0 < line <= len(source_lines):
+            actual_line = source_lines[line - 1].strip()
+            if actual_line.startswith("PRINT "):
+                var_name = actual_line[6:].strip()  # Remove "PRINT "
+                return f"Define '{var_name}' before using it: {var_name} = value"
+            elif "=" in actual_line:
+                # Assignment with undefined variable
+                return "All variables on the right side must be defined before use"
+            else:
+                return f"Define the variable before using it in: {actual_line}"
+        else:
+            return "Define the variable before using it"
+    
+    elif "index out of bounds" in error_lower:
+        return "Check that your index is within the valid range of the container"
+    
+    elif "division by zero" in error_lower:
+        return "Add a check to ensure the divisor is not zero before division"
+    
+    elif "file not found" in error_lower:
+        return "Check the file path and ensure the file exists in the specified location"
+    
+    else:
+        return "Check variable definitions and operation types"
 
 
 def repl() -> None:
@@ -1485,6 +1642,8 @@ def repl() -> None:
         try:
             run_source(buf, env)
         except Exception as e:
+            # Enhanced errors are handled in run_source, so this shouldn't happen
+            # But keep as fallback just in case
             print(f"! {e}")
         buf = ""
 
@@ -1518,6 +1677,8 @@ if __name__ == "__main__":
         if sys.argv[1] == "--example":
             print(EXAMPLE)
             sys.exit(0)
-        with open(sys.argv[1], "r", encoding="utf-8") as f:
-            src = f.read()
-        run_source(src)
+        else:
+            # Always use enhanced errors
+            with open(sys.argv[1], "r", encoding="utf-8") as f:
+                src = f.read()
+            run_source(src)
