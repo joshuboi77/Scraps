@@ -20,7 +20,8 @@ A concise, complete reference to the Scraps language as implemented in this VM.
   - [COUNT](#count)
   - [FISSION](#fission)
   - [FUSION](#fusion)
-  - [READ / WRITE](#read--write)
+- [READ / WRITE](#read--write)
+  - [Math Built-ins](#math-built-ins)
 - [Control Flow](#control-flow)
   - [IF / ELSE](#if--else)
   - [WHILE](#while)
@@ -138,6 +139,29 @@ File I/O with strings.
 WRITE("Hello") -> "tmp.txt"
 content = READ <- "tmp.txt"
 print content                 # Hello
+```
+
+### Math Built-ins
+
+Provided as built-in functions (radians for trig):
+
+- Constants: `PI`, `TAU`, `E`
+- Scalars: `abs(x)`, `sign(x)`, `floor(x)`, `ceil(x)`, `round(x)`, `trunc(x)`
+- Powers/roots: `sqrt(x)`, `cbrt(x)`, `pow(x, y)`
+- Trigonometry: `sin(x)`, `cos(x)`, `tan(x)`, `asin(x)`, `acos(x)`, `atan(x)`, `atan2(y, x)`
+- Exponentials/logs: `exp(x)`, `ln(x)`, `log10(x)`, `log2(x)`
+- Utilities: `min(a, b)`, `max(a, b)`, `clamp(x, lo, hi)`, `hypot(x, y)`, `deg(x)`, `rad(x)`
+  - Extras: `mod(a, b)`, `div(a, b)`, `divmod(a, b)`, `pow_int(x, n)`, `frac(x)`, `nearly_equal(a, b, eps)`,
+    `sum(xs)`, `mean(xs)`, `dot(a, b)`, `length(a)`, `sin_deg(x)`, `cos_deg(x)`, `tan_deg(x)`, `linspace(start, end, n)`, `range(start, end, step)`
+
+Examples:
+
+```scraps
+print sqrt(9)        # 3
+print sin(PI/2)     # ~1
+print pow(2, 10)    # 1024
+print clamp(5, 0, 3)# 3
+print hypot(3, 4)   # 5
 ```
 
 ## Control Flow
@@ -316,4 +340,3 @@ print fusion("") -> s2           # Hello World
 ---
 
 This manual documents all features supported by the VM, with examples and semantics to guide correct usage.
-

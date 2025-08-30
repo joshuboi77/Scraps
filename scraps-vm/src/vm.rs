@@ -234,6 +234,128 @@ fn execute_function(
                             _ => return Err("RESULT expects a function".to_string()),
                         }
                     }
+                    // Math built-ins (inside functions)
+                    "abs" => { if *arg_count != 1 { return Err("ABS expects 1 argument".to_string()); } let x = local_stack.pop().unwrap(); let v = match x { Value::Int(n) => (n as f64).abs(), Value::Float(f)=> f.abs(), _=> return Err("ABS: type".to_string())}; local_stack.push(Value::Float(v)); }
+                    "sign" => { if *arg_count != 1 { return Err("SIGN expects 1 argument".to_string()); } let x = local_stack.pop().unwrap(); let f = match x { Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("SIGN: type".to_string())}; let s = if f>0.0 {1.0} else if f<0.0 {-1.0} else {0.0}; local_stack.push(Value::Float(s)); }
+                    "floor" => { if *arg_count != 1 { return Err("FLOOR expects 1 argument".to_string()); } let f = match local_stack.pop().unwrap() { Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("FLOOR: type".to_string())}; local_stack.push(Value::Float(f.floor())); }
+                    "ceil" => { if *arg_count != 1 { return Err("CEIL expects 1 argument".to_string()); } let f = match local_stack.pop().unwrap() { Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("CEIL: type".to_string())}; local_stack.push(Value::Float(f.ceil())); }
+                    "round" => { if *arg_count != 1 { return Err("ROUND expects 1 argument".to_string()); } let f = match local_stack.pop().unwrap() { Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("ROUND: type".to_string())}; local_stack.push(Value::Float(f.round())); }
+                    "trunc" => { if *arg_count != 1 { return Err("TRUNC expects 1 argument".to_string()); } let f = match local_stack.pop().unwrap() { Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("TRUNC: type".to_string())}; local_stack.push(Value::Float(f.trunc())); }
+                    "sqrt" => { if *arg_count != 1 { return Err("SQRT expects 1 argument".to_string()); } let f = match local_stack.pop().unwrap() { Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("SQRT: type".to_string())}; if f<0.0 { return Err("SQRT: domain error".to_string()); } local_stack.push(Value::Float(f.sqrt())); }
+                    "cbrt" => { if *arg_count != 1 { return Err("CBRT expects 1 argument".to_string()); } let f = match local_stack.pop().unwrap() { Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("CBRT: type".to_string())}; local_stack.push(Value::Float(f.cbrt())); }
+                    "pow" => { if *arg_count != 2 { return Err("POW expects 2 arguments".to_string()); } let y = match local_stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("POW: type".to_string())}; let x = match local_stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("POW: type".to_string())}; local_stack.push(Value::Float(x.powf(y))); }
+                    "sin" => { if *arg_count != 1 { return Err("SIN expects 1 argument".to_string()); } let f = match local_stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("SIN: type".to_string())}; local_stack.push(Value::Float(f.sin())); }
+                    "cos" => { if *arg_count != 1 { return Err("COS expects 1 argument".to_string()); } let f = match local_stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("COS: type".to_string())}; local_stack.push(Value::Float(f.cos())); }
+                    "tan" => { if *arg_count != 1 { return Err("TAN expects 1 argument".to_string()); } let f = match local_stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("TAN: type".to_string())}; local_stack.push(Value::Float(f.tan())); }
+                    "asin" => { if *arg_count != 1 { return Err("ASIN expects 1 argument".to_string()); } let f = match local_stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("ASIN: type".to_string())}; if f < -1.0 || f > 1.0 { return Err("ASIN: domain error".to_string()); } local_stack.push(Value::Float(f.asin())); }
+                    "acos" => { if *arg_count != 1 { return Err("ACOS expects 1 argument".to_string()); } let f = match local_stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("ACOS: type".to_string())}; if f < -1.0 || f > 1.0 { return Err("ACOS: domain error".to_string()); } local_stack.push(Value::Float(f.acos())); }
+                    "atan" => { if *arg_count != 1 { return Err("ATAN expects 1 argument".to_string()); } let f = match local_stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("ATAN: type".to_string())}; local_stack.push(Value::Float(f.atan())); }
+                    "atan2" => { if *arg_count != 2 { return Err("ATAN2 expects 2 arguments".to_string()); } let x = match local_stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("ATAN2: type".to_string())}; let y = match local_stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("ATAN2: type".to_string())}; local_stack.push(Value::Float(y.atan2(x))); }
+                    "exp" => { if *arg_count != 1 { return Err("EXP expects 1 argument".to_string()); } let f = match local_stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("EXP: type".to_string())}; local_stack.push(Value::Float(f.exp())); }
+                    "ln" => { if *arg_count != 1 { return Err("LN expects 1 argument".to_string()); } let f = match local_stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("LN: type".to_string())}; if f<=0.0 { return Err("LN: domain error".to_string()); } local_stack.push(Value::Float(f.ln())); }
+                    "log10" => { if *arg_count != 1 { return Err("LOG10 expects 1 argument".to_string()); } let f=match local_stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=> return Err("LOG10: type".to_string())}; if f<=0.0 { return Err("LOG10: domain error".to_string()); } local_stack.push(Value::Float(f.log10())); }
+                    "log2" => { if *arg_count != 1 { return Err("LOG2 expects 1 argument".to_string()); } let f=match local_stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=> return Err("LOG2: type".to_string())}; if f<=0.0 { return Err("LOG2: domain error".to_string()); } local_stack.push(Value::Float(f.log2())); }
+                    "min" => { if *arg_count != 2 { return Err("MIN expects 2 arguments".to_string()); } let b=match local_stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=>return Err("MIN: type".to_string())}; let a=match local_stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=>return Err("MIN: type".to_string())}; local_stack.push(Value::Float(a.min(b))); }
+                    "max" => { if *arg_count != 2 { return Err("MAX expects 2 arguments".to_string()); } let b=match local_stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=>return Err("MAX: type".to_string())}; let a=match local_stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=>return Err("MAX: type".to_string())}; local_stack.push(Value::Float(a.max(b))); }
+                    "clamp" => { if *arg_count != 3 { return Err("CLAMP expects 3 arguments".to_string()); } let hi=match local_stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=>return Err("CLAMP: type".to_string())}; let lo=match local_stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=>return Err("CLAMP: type".to_string())}; let x=match local_stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=>return Err("CLAMP: type".to_string())}; if lo>hi { return Err("CLAMP: domain error".to_string()); } local_stack.push(Value::Float(x.max(lo).min(hi))); }
+                    "hypot" => { if *arg_count != 2 { return Err("HYPOT expects 2 arguments".to_string()); } let b=match local_stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=>return Err("HYPOT: type".to_string())}; let a=match local_stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=>return Err("HYPOT: type".to_string())}; local_stack.push(Value::Float(a.hypot(b))); }
+                    "deg" => { if *arg_count != 1 { return Err("DEG expects 1 argument".to_string()); } let f=match local_stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=> return Err("DEG: type".to_string())}; local_stack.push(Value::Float(f*180.0/std::f64::consts::PI)); }
+                    "rad" => { if *arg_count != 1 { return Err("RAD expects 1 argument".to_string()); } let f=match local_stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=> return Err("RAD: type".to_string())}; local_stack.push(Value::Float(f*std::f64::consts::PI/180.0)); }
+                    // Extra helpers (inside functions)
+                    "mod" => { if *arg_count != 2 { return Err("MOD expects 2 arguments".to_string()); } let b=local_stack.pop().unwrap(); let a=local_stack.pop().unwrap(); match (a,b){(Value::Int(x),Value::Int(y))=>{ if y==0 { return Err("MOD: division by zero".to_string()); } local_stack.push(Value::Int(x.rem_euclid(y))); }, (Value::Float(x),Value::Float(y))=>{ local_stack.push(Value::Float(x.rem_euclid(y))); }, (Value::Int(x),Value::Float(y))=>{ local_stack.push(Value::Float((x as f64).rem_euclid(y))); }, (Value::Float(x),Value::Int(y))=>{ local_stack.push(Value::Float(x.rem_euclid(y as f64))); }, _=> return Err("MOD: type".to_string()) } }
+                    "div" => { if *arg_count != 2 { return Err("DIV expects 2 arguments".to_string()); } let b=local_stack.pop().unwrap(); let a=local_stack.pop().unwrap(); match (a,b){(Value::Int(x),Value::Int(y))=>{ if y==0 { return Err("DIV: division by zero".to_string()); } local_stack.push(Value::Int(x.div_euclid(y))); }, _=> return Err("DIV: int type".to_string()) } }
+                    "divmod" => { if *arg_count != 2 { return Err("DIVMOD expects 2 arguments".to_string()); } let b=local_stack.pop().unwrap(); let a=local_stack.pop().unwrap(); match (a,b){(Value::Int(x),Value::Int(y))=>{ if y==0 { return Err("DIVMOD: division by zero".to_string()); } let q = x.div_euclid(y); let r = x.rem_euclid(y); local_stack.push(Value::Box(vec![Value::Int(q), Value::Int(r)])); }, _=> return Err("DIVMOD: int type".to_string()) } }
+                    "pow_int" => { if *arg_count != 2 { return Err("POW_INT expects 2 arguments".to_string()); } let n_v=local_stack.pop().unwrap(); let x_v=local_stack.pop().unwrap(); let n = match n_v { Value::Int(k)=>k, _=> return Err("POW_INT: exponent must be int".to_string())}; match x_v { Value::Int(x)=>{ if n<0 { local_stack.push(Value::Float((x as f64).powi(n as i32))); } else { let mut res:i64=1; let mut base=x; let mut exp=n; while exp>0 { if (exp & 1)==1 { res = res.saturating_mul(base); } base = base.saturating_mul(base); exp >>= 1; } local_stack.push(Value::Int(res)); } }, Value::Float(x)=>{ local_stack.push(Value::Float(x.powi(n as i32))); }, _=> return Err("POW_INT: base type".to_string()) }
+                    }
+                    "frac" => { if *arg_count != 1 { return Err("FRAC expects 1 argument".to_string()); } let v=local_stack.pop().unwrap(); match v { Value::Int(_)=> local_stack.push(Value::Float(0.0)), Value::Float(f)=> local_stack.push(Value::Float(f.fract())), _=> return Err("FRAC: type".to_string()) } }
+                    "nearly_equal" => { if *arg_count != 3 { return Err("NEARLY_EQUAL expects 3 arguments".to_string()); } let eps=match local_stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=>f, _=> return Err("NEARLY_EQUAL: type".to_string())}; let b=match local_stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=>f, _=> return Err("NEARLY_EQUAL: type".to_string())}; let a=match local_stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=>f, _=> return Err("NEARLY_EQUAL: type".to_string())}; local_stack.push(Value::Bool((a-b).abs() <= eps)); }
+                    "sum" => { if *arg_count != 1 { return Err("SUM expects 1 argument".to_string()); } let xs = local_stack.pop().unwrap(); match xs { Value::Box(vs)=>{ let mut acc=0.0; for v in vs { match v { Value::Int(n)=> acc += n as f64, Value::Float(f)=> acc += f, _=> return Err("SUM: element type".to_string()) } } local_stack.push(Value::Float(acc)); }, _=> return Err("SUM: expects box".to_string()) } }
+                    "mean" => { 
+                        if *arg_count != 1 { return Err("MEAN expects 1 argument".to_string()); } 
+                        let xs = local_stack.pop().unwrap(); 
+                        match xs { 
+                            Value::Box(vs)=>{ 
+                                if vs.is_empty() { return Err("MEAN: empty".to_string()); } 
+                                let len = vs.len();
+                                let mut acc=0.0; 
+                                for v in vs { 
+                                    match v { 
+                                        Value::Int(n)=> acc += n as f64, 
+                                        Value::Float(f)=> acc += f, 
+                                        _=> return Err("MEAN: element type".to_string()) 
+                                    } 
+                                } 
+                                local_stack.push(Value::Float(acc / len as f64)); 
+                            }, 
+                            _=> return Err("MEAN: expects box".to_string()) 
+                        } 
+                    }
+                    "dot" => { if *arg_count != 2 { return Err("DOT expects 2 arguments".to_string()); } let b=local_stack.pop().unwrap(); let a=local_stack.pop().unwrap(); match (a,b){(Value::Box(as_), Value::Box(bs))=>{ if as_.len()!=bs.len(){ return Err("DOT: length mismatch".to_string()); } let mut acc=0.0; for (va,vb) in as_.into_iter().zip(bs.into_iter()) { let fa = match va { Value::Int(n)=> n as f64, Value::Float(f)=>f, _=> return Err("DOT: element type".to_string())}; let fb = match vb { Value::Int(n)=> n as f64, Value::Float(f)=>f, _=> return Err("DOT: element type".to_string())}; acc += fa*fb; } local_stack.push(Value::Float(acc)); }, _=> return Err("DOT: expects boxes".to_string()) } }
+                    "length" => { if *arg_count != 1 { return Err("LENGTH expects 1 argument".to_string()); } let a=local_stack.pop().unwrap(); match a { Value::Box(vs)=>{ let mut acc=0.0; for v in vs { let f=match v{Value::Int(n)=> n as f64, Value::Float(f)=>f, _=> return Err("LENGTH: element type".to_string())}; acc += f*f; } local_stack.push(Value::Float(acc.sqrt())); }, _=> return Err("LENGTH: expects box".to_string()) } }
+                    "sin_deg" => { if *arg_count != 1 { return Err("SIN_DEG expects 1 argument".to_string()); } let d=match local_stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=>f, _=> return Err("SIN_DEG: type".to_string())}; local_stack.push(Value::Float((d*std::f64::consts::PI/180.0).sin())); }
+                    "cos_deg" => { if *arg_count != 1 { return Err("COS_DEG expects 1 argument".to_string()); } let d=match local_stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=>f, _=> return Err("COS_DEG: type".to_string())}; local_stack.push(Value::Float((d*std::f64::consts::PI/180.0).cos())); }
+                    "tan_deg" => { if *arg_count != 1 { return Err("TAN_DEG expects 1 argument".to_string()); } let d=match local_stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=>f, _=> return Err("TAN_DEG: type".to_string())}; local_stack.push(Value::Float((d*std::f64::consts::PI/180.0).tan())); }
+                    "linspace" => { if *arg_count != 3 { return Err("LINSPACE expects 3 arguments".to_string()); } let n_v = local_stack.pop().unwrap(); let end_v = local_stack.pop().unwrap(); let start_v = local_stack.pop().unwrap(); let n = match n_v { Value::Int(k)=>k, _=> return Err("LINSPACE: n must be int".to_string())}; if n < 2 { return Err("LINSPACE: n >= 2".to_string()); } let start = match start_v { Value::Int(x)=> x as f64, Value::Float(f)=>f, _=> return Err("LINSPACE: type".to_string())}; let end = match end_v { Value::Int(x)=> x as f64, Value::Float(f)=>f, _=> return Err("LINSPACE: type".to_string())}; let step = (end-start) / (n-1) as f64; let mut out = Vec::with_capacity(n as usize); let mut i=0; while i < n { out.push(Value::Float(start + step * i as f64)); i += 1; } local_stack.push(Value::Box(out)); }
+                    "range" => { 
+                        if *arg_count != 3 { return Err("RANGE expects 3 arguments".to_string()); } 
+                        let step_v=local_stack.pop().unwrap(); 
+                        let end_v=local_stack.pop().unwrap(); 
+                        let start_v=local_stack.pop().unwrap(); 
+                        let mut max_iter: i64 = 1_000_000; 
+                        match (start_v, end_v, step_v) { 
+                            (Value::Int(mut a), Value::Int(b), Value::Int(s))=>{ 
+                                if s==0 { return Err("RANGE: step=0".to_string()); } 
+                                let mut out=Vec::new(); 
+                                if s>0 { 
+                                    while a < b && max_iter>0 { 
+                                        out.push(Value::Int(a)); 
+                                        a += s; 
+                                        max_iter-=1; 
+                                    } 
+                                } else { 
+                                    while a > b && max_iter>0 { 
+                                        out.push(Value::Int(a)); 
+                                        a += s; 
+                                        max_iter-=1; 
+                                    } 
+                                } 
+                                local_stack.push(Value::Box(out)); 
+                            }, 
+                            (a_v, b_v, s_v)=>{ 
+                                let mut a = match a_v { 
+                                    Value::Int(x)=> x as f64, 
+                                    Value::Float(f)=>f, 
+                                    _=> return Err("RANGE: type".to_string())
+                                }; 
+                                let b = match b_v { 
+                                    Value::Int(x)=> x as f64, 
+                                    Value::Float(f)=>f, 
+                                    _=> return Err("RANGE: type".to_string())
+                                }; 
+                                let s = match s_v { 
+                                    Value::Int(x)=> x as f64, 
+                                    Value::Float(f)=>f, 
+                                    _=> return Err("RANGE: type".to_string())
+                                }; 
+                                if s==0.0 { return Err("RANGE: step=0".to_string()); } 
+                                let mut out=Vec::new(); 
+                                if s>0.0 { 
+                                    while a < b && max_iter>0 { 
+                                        out.push(Value::Float(a)); 
+                                        a += s; 
+                                        max_iter-=1; 
+                                    } 
+                                } else { 
+                                    while a > b && max_iter>0 { 
+                                        out.push(Value::Float(a)); 
+                                        a += s; 
+                                        max_iter-=1; 
+                                    } 
+                                } 
+                                local_stack.push(Value::Box(out)); 
+                            } 
+                        } 
+                    }
                     "read" => { if *arg_count != 1 { return Err("READ expects exactly 1 argument".to_string()); }
                         let filename = local_stack.pop().expect("Expected filename for READ");
                         let path = match filename { Value::Str(s) => s, _ => return Err("READ filename must be a string".to_string()) };
@@ -552,6 +674,26 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
         body: vec![],
         rewire_target: None,
     });
+    // Math built-ins (stubs; dispatch handled in Call)
+    for name in [
+        "abs","sign","floor","ceil","round","trunc",
+        "sqrt","cbrt","pow",
+        "sin","cos","tan","asin","acos","atan","atan2",
+        "exp","ln","log10","log2",
+        "min","max","clamp","hypot","deg","rad",
+        "mod","div","divmod","pow_int","frac","nearly_equal","sum","mean","dot","length","sin_deg","cos_deg","tan_deg","linspace","range"
+    ] {
+        env.insert(name.to_string(), Value::Function {
+            name: name.to_string(),
+            params: vec![],
+            body: vec![],
+            rewire_target: None,
+        });
+    }
+    // Math constants
+    env.insert("PI".to_string(), Value::Float(std::f64::consts::PI));
+    env.insert("TAU".to_string(), Value::Float(std::f64::consts::TAU));
+    env.insert("E".to_string(), Value::Float(std::f64::consts::E));
     
     let mut ip: usize = 0; // Instruction pointer
     
@@ -1015,6 +1157,127 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                             Ok(_) => stack.push(Value::Str(data)),
                             Err(e) => return Err(format!("WRITE error: {}", e)),
                         }
+                    }
+                    // Math built-ins (top-level)
+                    "abs" => { if *arg_count != 1 { return Err("ABS expects 1 argument".to_string()); } let x = stack.pop().unwrap(); let v = match x { Value::Int(n) => (n as f64).abs(), Value::Float(f)=> f.abs(), _=> return Err("ABS: type".to_string())}; stack.push(Value::Float(v)); }
+                    "sign" => { if *arg_count != 1 { return Err("SIGN expects 1 argument".to_string()); } let x = stack.pop().unwrap(); let f = match x { Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("SIGN: type".to_string())}; let s = if f>0.0 {1.0} else if f<0.0 {-1.0} else {0.0}; stack.push(Value::Float(s)); }
+                    "floor" => { if *arg_count != 1 { return Err("FLOOR expects 1 argument".to_string()); } let f = match stack.pop().unwrap() { Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("FLOOR: type".to_string())}; stack.push(Value::Float(f.floor())); }
+                    "ceil" => { if *arg_count != 1 { return Err("CEIL expects 1 argument".to_string()); } let f = match stack.pop().unwrap() { Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("CEIL: type".to_string())}; stack.push(Value::Float(f.ceil())); }
+                    "round" => { if *arg_count != 1 { return Err("ROUND expects 1 argument".to_string()); } let f = match stack.pop().unwrap() { Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("ROUND: type".to_string())}; stack.push(Value::Float(f.round())); }
+                    "trunc" => { if *arg_count != 1 { return Err("TRUNC expects 1 argument".to_string()); } let f = match stack.pop().unwrap() { Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("TRUNC: type".to_string())}; stack.push(Value::Float(f.trunc())); }
+                    "sqrt" => { if *arg_count != 1 { return Err("SQRT expects 1 argument".to_string()); } let f = match stack.pop().unwrap() { Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("SQRT: type".to_string())}; if f<0.0 { return Err("SQRT: domain error".to_string()); } stack.push(Value::Float(f.sqrt())); }
+                    "cbrt" => { if *arg_count != 1 { return Err("CBRT expects 1 argument".to_string()); } let f = match stack.pop().unwrap() { Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("CBRT: type".to_string())}; stack.push(Value::Float(f.cbrt())); }
+                    "pow" => { if *arg_count != 2 { return Err("POW expects 2 arguments".to_string()); } let y = match stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("POW: type".to_string())}; let x = match stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("POW: type".to_string())}; stack.push(Value::Float(x.powf(y))); }
+                    "sin" => { if *arg_count != 1 { return Err("SIN expects 1 argument".to_string()); } let f = match stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("SIN: type".to_string())}; stack.push(Value::Float(f.sin())); }
+                    "cos" => { if *arg_count != 1 { return Err("COS expects 1 argument".to_string()); } let f = match stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("COS: type".to_string())}; stack.push(Value::Float(f.cos())); }
+                    "tan" => { if *arg_count != 1 { return Err("TAN expects 1 argument".to_string()); } let f = match stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("TAN: type".to_string())}; stack.push(Value::Float(f.tan())); }
+                    "asin" => { if *arg_count != 1 { return Err("ASIN expects 1 argument".to_string()); } let f = match stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("ASIN: type".to_string())}; if f < -1.0 || f > 1.0 { return Err("ASIN: domain error".to_string()); } stack.push(Value::Float(f.asin())); }
+                    "acos" => { if *arg_count != 1 { return Err("ACOS expects 1 argument".to_string()); } let f = match stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("ACOS: type".to_string())}; if f < -1.0 || f > 1.0 { return Err("ACOS: domain error".to_string()); } stack.push(Value::Float(f.acos())); }
+                    "atan" => { if *arg_count != 1 { return Err("ATAN expects 1 argument".to_string()); } let f = match stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("ATAN: type".to_string())}; stack.push(Value::Float(f.atan())); }
+                    "atan2" => { if *arg_count != 2 { return Err("ATAN2 expects 2 arguments".to_string()); } let x = match stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("ATAN2: type".to_string())}; let y = match stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("ATAN2: type".to_string())}; stack.push(Value::Float(y.atan2(x))); }
+                    "exp" => { if *arg_count != 1 { return Err("EXP expects 1 argument".to_string()); } let f = match stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("EXP: type".to_string())}; stack.push(Value::Float(f.exp())); }
+                    "ln" => { if *arg_count != 1 { return Err("LN expects 1 argument".to_string()); } let f = match stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("LN: type".to_string())}; if f<=0.0 { return Err("LN: domain error".to_string()); } stack.push(Value::Float(f.ln())); }
+                    "log10" => { if *arg_count != 1 { return Err("LOG10 expects 1 argument".to_string()); } let f=match stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=> return Err("LOG10: type".to_string())}; if f<=0.0 { return Err("LOG10: domain error".to_string()); } stack.push(Value::Float(f.log10())); }
+                    "log2" => { if *arg_count != 1 { return Err("LOG2 expects 1 argument".to_string()); } let f=match stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=> return Err("LOG2: type".to_string())}; if f<=0.0 { return Err("LOG2: domain error".to_string()); } stack.push(Value::Float(f.log2())); }
+                    "min" => { if *arg_count != 2 { return Err("MIN expects 2 arguments".to_string()); } let b=match stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=>return Err("MIN: type".to_string())}; let a=match stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=>return Err("MIN: type".to_string())}; stack.push(Value::Float(a.min(b))); }
+                    "max" => { if *arg_count != 2 { return Err("MAX expects 2 arguments".to_string()); } let b=match stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=>return Err("MAX: type".to_string())}; let a=match stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=>return Err("MAX: type".to_string())}; stack.push(Value::Float(a.max(b))); }
+                    "clamp" => { if *arg_count != 3 { return Err("CLAMP expects 3 arguments".to_string()); } let hi=match stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=>return Err("CLAMP: type".to_string())}; let lo=match stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=>return Err("CLAMP: type".to_string())}; let x=match stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=>return Err("CLAMP: type".to_string())}; if lo>hi { return Err("CLAMP: domain error".to_string()); } stack.push(Value::Float(x.max(lo).min(hi))); }
+                    "hypot" => { if *arg_count != 2 { return Err("HYPOT expects 2 arguments".to_string()); } let b=match stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=>return Err("HYPOT: type".to_string())}; let a=match stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=>return Err("HYPOT: type".to_string())}; stack.push(Value::Float(a.hypot(b))); }
+                    "deg" => { if *arg_count != 1 { return Err("DEG expects 1 argument".to_string()); } let f=match stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=> return Err("DEG: type".to_string())}; stack.push(Value::Float(f*180.0/std::f64::consts::PI)); }
+                    "rad" => { if *arg_count != 1 { return Err("RAD expects 1 argument".to_string()); } let f=match stack.pop().unwrap(){Value::Int(n)=>n as f64, Value::Float(f)=>f, _=> return Err("RAD: type".to_string())}; stack.push(Value::Float(f*std::f64::consts::PI/180.0)); }
+                    // Extra helpers (top-level)
+                    "mod" => { if *arg_count != 2 { return Err("MOD expects 2 arguments".to_string()); } let b=stack.pop().unwrap(); let a=stack.pop().unwrap(); match (a,b){(Value::Int(x),Value::Int(y))=>{ if y==0 { return Err("MOD: division by zero".to_string()); } stack.push(Value::Int(x.rem_euclid(y))); }, (Value::Float(x),Value::Float(y))=>{ stack.push(Value::Float(x.rem_euclid(y))); }, (Value::Int(x),Value::Float(y))=>{ stack.push(Value::Float((x as f64).rem_euclid(y))); }, (Value::Float(x),Value::Int(y))=>{ stack.push(Value::Float(x.rem_euclid(y as f64))); }, _=> return Err("MOD: type".to_string()) } }
+                    "div" => { if *arg_count != 2 { return Err("DIV expects 2 arguments".to_string()); } let b=stack.pop().unwrap(); let a=stack.pop().unwrap(); match (a,b){(Value::Int(x),Value::Int(y))=>{ if y==0 { return Err("DIV: division by zero".to_string()); } stack.push(Value::Int(x.div_euclid(y))); }, _=> return Err("DIV: int type".to_string()) } }
+                    "divmod" => { if *arg_count != 2 { return Err("DIVMOD expects 2 arguments".to_string()); } let b=stack.pop().unwrap(); let a=stack.pop().unwrap(); match (a,b){(Value::Int(x),Value::Int(y))=>{ if y==0 { return Err("DIVMOD: division by zero".to_string()); } let q = x.div_euclid(y); let r = x.rem_euclid(y); stack.push(Value::Box(vec![Value::Int(q), Value::Int(r)])); }, _=> return Err("DIVMOD: int type".to_string()) } }
+                    "pow_int" => { if *arg_count != 2 { return Err("POW_INT expects 2 arguments".to_string()); } let n_v=stack.pop().unwrap(); let x_v=stack.pop().unwrap(); let n = match n_v { Value::Int(k)=>k, _=> return Err("POW_INT: exponent must be int".to_string())}; match x_v { Value::Int(x)=>{ if n<0 { stack.push(Value::Float((x as f64).powi(n as i32))); } else { let mut res:i64=1; let mut base=x; let mut exp=n; while exp>0 { if (exp & 1)==1 { res = res.saturating_mul(base); } base = base.saturating_mul(base); exp >>= 1; } stack.push(Value::Int(res)); } }, Value::Float(x)=>{ stack.push(Value::Float(x.powi(n as i32))); }, _=> return Err("POW_INT: base type".to_string()) } }
+                    "frac" => { if *arg_count != 1 { return Err("FRAC expects 1 argument".to_string()); } let v=stack.pop().unwrap(); match v { Value::Int(_)=> stack.push(Value::Float(0.0)), Value::Float(f)=> stack.push(Value::Float(f.fract())), _=> return Err("FRAC: type".to_string()) } }
+                    "nearly_equal" => { if *arg_count != 3 { return Err("NEARLY_EQUAL expects 3 arguments".to_string()); } let eps=match stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=>f, _=> return Err("NEARLY_EQUAL: type".to_string())}; let b=match stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=>f, _=> return Err("NEARLY_EQUAL: type".to_string())}; let a=match stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=>f, _=> return Err("NEARLY_EQUAL: type".to_string())}; stack.push(Value::Bool((a-b).abs() <= eps)); }
+                    "sum" => { if *arg_count != 1 { return Err("SUM expects 1 argument".to_string()); } let xs = stack.pop().unwrap(); match xs { Value::Box(vs)=>{ let mut acc=0.0; for v in vs { match v { Value::Int(n)=> acc += n as f64, Value::Float(f)=> acc += f, _=> return Err("SUM: element type".to_string()) } } stack.push(Value::Float(acc)); }, _=> return Err("SUM: expects box".to_string()) } }
+                    "mean" => { 
+                        if *arg_count != 1 { return Err("MEAN expects 1 argument".to_string()); } 
+                        let xs = stack.pop().unwrap(); 
+                        match xs { 
+                            Value::Box(vs)=>{ 
+                                if vs.is_empty() { return Err("MEAN: empty".to_string()); } 
+                                let len = vs.len();
+                                let mut acc=0.0; 
+                                for v in vs { 
+                                    match v { 
+                                        Value::Int(n)=> acc += n as f64, 
+                                        Value::Float(f)=> acc += f, 
+                                        _=> return Err("MEAN: element type".to_string()) 
+                                    } 
+                                } 
+                                stack.push(Value::Float(acc / len as f64)); 
+                            }, 
+                            _=> return Err("MEAN: expects box".to_string()) 
+                        } 
+                    }
+                    "dot" => { if *arg_count != 2 { return Err("DOT expects 2 arguments".to_string()); } let b=stack.pop().unwrap(); let a=stack.pop().unwrap(); match (a,b){(Value::Box(as_), Value::Box(bs))=>{ if as_.len()!=bs.len(){ return Err("DOT: length mismatch".to_string()); } let mut acc=0.0; for (va,vb) in as_.into_iter().zip(bs.into_iter()) { let fa = match va { Value::Int(n)=> n as f64, Value::Float(f)=>f, _=> return Err("DOT: element type".to_string())}; let fb = match vb { Value::Int(n)=> n as f64, Value::Float(f)=>f, _=> return Err("DOT: element type".to_string())}; acc += fa*fb; } stack.push(Value::Float(acc)); }, _=> return Err("DOT: expects boxes".to_string()) } }
+                    "length" => { if *arg_count != 1 { return Err("LENGTH expects 1 argument".to_string()); } let a=stack.pop().unwrap(); match a { Value::Box(vs)=>{ let mut acc=0.0; for v in vs { let f=match v{Value::Int(n)=> n as f64, Value::Float(f)=>f, _=> return Err("LENGTH: element type".to_string())}; acc += f*f; } stack.push(Value::Float(acc.sqrt())); }, _=> return Err("LENGTH: expects box".to_string()) } }
+                    "sin_deg" => { if *arg_count != 1 { return Err("SIN_DEG expects 1 argument".to_string()); } let d=match stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=>f, _=> return Err("SIN_DEG: type".to_string())}; stack.push(Value::Float((d*std::f64::consts::PI/180.0).sin())); }
+                    "cos_deg" => { if *arg_count != 1 { return Err("COS_DEG expects 1 argument".to_string()); } let d=match stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=>f, _=> return Err("COS_DEG: type".to_string())}; stack.push(Value::Float((d*std::f64::consts::PI/180.0).cos())); }
+                    "tan_deg" => { if *arg_count != 1 { return Err("TAN_DEG expects 1 argument".to_string()); } let d=match stack.pop().unwrap(){Value::Int(n)=> n as f64, Value::Float(f)=>f, _=> return Err("TAN_DEG: type".to_string())}; stack.push(Value::Float((d*std::f64::consts::PI/180.0).tan())); }
+                    "linspace" => { if *arg_count != 3 { return Err("LINSPACE expects 3 arguments".to_string()); } let n_v = stack.pop().unwrap(); let end_v = stack.pop().unwrap(); let start_v = stack.pop().unwrap(); let n = match n_v { Value::Int(k)=>k, _=> return Err("LINSPACE: n must be int".to_string())}; if n < 2 { return Err("LINSPACE: n >= 2".to_string()); } let start = match start_v { Value::Int(x)=> x as f64, Value::Float(f)=>f, _=> return Err("LINSPACE: type".to_string())}; let end = match end_v { Value::Int(x)=> x as f64, Value::Float(f)=>f, _=> return Err("LINSPACE: type".to_string())}; let step = (end-start) / (n-1) as f64; let mut out = Vec::with_capacity(n as usize); let mut i=0; while i < n { out.push(Value::Float(start + step * i as f64)); i += 1; } stack.push(Value::Box(out)); }
+                    "range" => { 
+                        if *arg_count != 3 { return Err("RANGE expects 3 arguments".to_string()); } 
+                        let step_v=stack.pop().unwrap(); 
+                        let end_v=stack.pop().unwrap(); 
+                        let start_v=stack.pop().unwrap(); 
+                        let mut max_iter: i64 = 1_000_000; 
+                        match (start_v, end_v, step_v) { 
+                            (Value::Int(mut a), Value::Int(b), Value::Int(s))=>{ 
+                                if s==0 { return Err("RANGE: step=0".to_string()); } 
+                                let mut out=Vec::new(); 
+                                if s>0 { 
+                                    while a < b && max_iter>0 { 
+                                        out.push(Value::Int(a)); 
+                                        a += s; 
+                                        max_iter-=1; 
+                                    } 
+                                } else { 
+                                    while a > b && max_iter>0 { 
+                                        out.push(Value::Int(a)); 
+                                        a += s; 
+                                        max_iter-=1; 
+                                    } 
+                                } 
+                                stack.push(Value::Box(out)); 
+                            }, 
+                            (a_v, b_v, s_v)=>{ 
+                                let mut a = match a_v { 
+                                    Value::Int(x)=> x as f64, 
+                                    Value::Float(f)=>f, 
+                                    _=> return Err("RANGE: type".to_string())
+                                }; 
+                                let b = match b_v { 
+                                    Value::Int(x)=> x as f64, 
+                                    Value::Float(f)=>f, 
+                                    _=> return Err("RANGE: type".to_string())
+                                }; 
+                                let s = match s_v { 
+                                    Value::Int(x)=> x as f64, 
+                                    Value::Float(f)=>f, 
+                                    _=> return Err("RANGE: type".to_string())
+                                }; 
+                                if s==0.0 { return Err("RANGE: step=0".to_string()); } 
+                                let mut out=Vec::new(); 
+                                if s>0.0 { 
+                                    while a < b && max_iter>0 { 
+                                        out.push(Value::Float(a)); 
+                                        a += s; 
+                                        max_iter-=1; 
+                                    } 
+                                } else { 
+                                    while a > b && max_iter>0 { 
+                                        out.push(Value::Float(a)); 
+                                        a += s; 
+                                        max_iter-=1; 
+                                    } 
+                                } 
+                                stack.push(Value::Box(out)); 
+                            } 
+                        } 
                     }
                     "fission" => {
                         if *arg_count != 2 { return Err("FISSION expects exactly 2 arguments".to_string()); }
