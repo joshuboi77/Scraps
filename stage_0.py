@@ -830,32 +830,7 @@ class Env:
         self._rewired_syms: set[str] = set()
 
     # Stub definitions for built-in methods (for Pylance, etc.)
-    def _builtin_pack(self, *args):
-        raise NotImplementedError("_builtin_pack not yet implemented")
-
-    def _builtin_place(self, *args):
-        raise NotImplementedError("_builtin_place not yet implemented")
-
-    def _builtin_unpack(self, *args):
-        raise NotImplementedError("_builtin_unpack not yet implemented")
-
-    def _builtin_pick(self, *args):
-        raise NotImplementedError("_builtin_pick not yet implemented")
-
-    def _builtin_print(self, *args):
-        raise NotImplementedError("_builtin_print not yet implemented")
-
-    def _builtin_read(self, *args):
-        raise NotImplementedError("_builtin_read not yet implemented")
-
-    def _builtin_write(self, *args):
-        raise NotImplementedError("_builtin_write not yet implemented")
-    
-    def _builtin_fission(self, *args):
-        raise NotImplementedError("_builtin_fission not yet implemented")
-    
-    def _builtin_fusion(self, *args):
-        raise NotImplementedError("_builtin_fusion not yet implemented")
+    # Only keep one implementation for each built-in method.
     
     def _builtin_fab(self, f):
         if isinstance(f, Func):
