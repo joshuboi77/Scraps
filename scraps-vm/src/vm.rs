@@ -7,6 +7,7 @@ use std::io::Write;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::compiler::Compiler;
+use std::fs;
 
 const REWIRED_KEY: &str = "__rewired__";
 
@@ -42,6 +43,45 @@ fn eval_snippet(env: &mut HashMap<String, Value>, src: &str) -> Result<Value, St
     execute_function(&bytecode, &mut stack, env)
 }
 
+fn read_modules_manifest() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let path = "Scraps.toml";
+    let content = match fs::read_to_string(path) { Ok(s) => s, Err(_) => return map };
+    let mut in_modules = false;
+    for line in content.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') { continue; }
+        if t.starts_with('[') {
+            in_modules = t == "[modules]";
+            continue;
+        }
+        if !in_modules { continue; }
+        if let Some(eq) = t.find('=') {
+            let key = t[..eq].trim().to_string();
+            let mut val = t[eq+1..].trim().to_string();
+            if val.starts_with('"') && val.ends_with('"') && val.len() >= 2 {
+                val = val[1..val.len()-1].to_string();
+            }
+            if !key.is_empty() && !val.is_empty() { map.insert(key, val); }
+        }
+    }
+    map
+}
+
+fn load_module_from_key(env: &mut HashMap<String, Value>, key: &str) -> Result<(), String> {
+    // Lookup in Scraps.toml [modules]
+    let manifest = read_modules_manifest();
+    if let Some(path) = manifest.get(key) {
+        let code = fs::read_to_string(path).map_err(|e| format!("SOURCE error: {}", e))?;
+        let _ = eval_snippet(env, &code)?;
+        return Ok(());
+    }
+    // Fallback: treat key as a direct filepath
+    let code = fs::read_to_string(key).map_err(|_| format!("IMPORT: module key '{}' not found and file '{}' unreadable", key, key))?;
+    let _ = eval_snippet(env, &code)?;
+    Ok(())
+}
+
 /// Execute a function's bytecode body
 fn execute_function(
     body: &[OpCode], 
@@ -52,10 +92,10 @@ fn execute_function(
     let local_env = env; // operate on provided environment
     let mut ip: usize = 0;
     
-    while ip < body.len() {
-        let instr = &body[ip];
-        
-        match instr {
+        while ip < body.len() {
+            let instr = &body[ip];
+            
+            match instr {
             // Stack operations
             OpCode::PushInt(n) => local_stack.push(Value::Int(*n)),
             OpCode::PushFloat(f) => local_stack.push(Value::Float(*f)),
@@ -69,6 +109,16 @@ fn execute_function(
                 } else {
                     return Err(format!("Undefined variable '{}' in function", name));
                 }
+            }
+            OpCode::MakeFuncWithBody { name, parameters, body, rewire_target } => {
+                // Create function within the local (function) environment
+                let func_value = Value::Function {
+                    name: name.clone(),
+                    params: parameters.clone(),
+                    body: body.clone(),
+                    rewire_target: rewire_target.clone(),
+                };
+                local_env.insert(name.clone(), func_value);
             }
 
             // Box operations inside functions
@@ -212,6 +262,94 @@ fn execute_function(
                 let func = local_env.get(&func_name).ok_or("Function not found")?;
                 match func_name.as_str() {
                     "box" => { if *arg_count != 0 { return Err("BOX expects 0 arguments".to_string()); } local_stack.push(Value::Box(vec![])); }
+                    "source" => {
+                        if *arg_count != 1 { return Err("SOURCE expects exactly 1 argument".to_string()); }
+                        let filename = local_stack.pop().expect("Expected filename for SOURCE");
+                        let path = match filename { Value::Str(s) => s, _ => return Err("SOURCE filename must be a string".to_string()) };
+                        let content = match std::fs::read_to_string(&path) { Ok(s) => s, Err(e) => return Err(format!("SOURCE error: {}", e)) };
+                        let result = eval_snippet(local_env, &content)?;
+                        local_stack.push(result);
+                    }
+                    "import" => {
+                        match *arg_count {
+                            1 => {
+                                let arg = local_stack.pop().expect("Expected argument for IMPORT");
+                                let module_name = match arg {
+                                    Value::Str(s) => s,
+                                    Value::Function { name, params, .. } => {
+                                        if !params.is_empty() { return Err("IMPORT: function argument must take 0 parameters".to_string()); }
+                                        name
+                                    }
+                                    _ => return Err("IMPORT: module must be a string or function".to_string()),
+                                };
+                                let module_key = format!("__module_{}", module_name);
+                                let module_val = local_env.get(&module_key).ok_or_else(|| format!("IMPORT: module '{}' not found", module_name))?;
+                                let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
+                                let mut count = 0;
+                                for pair in exports_box.into_iter() {
+                                    if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); local_env.insert(key.clone(), val); count+=1; } } }
+                                }
+                                local_stack.push(Value::Str(format!("Module '{}' imported with {} exports", module_name, count)));
+                            }
+                            2 => {
+                                let src_key_val = local_stack.pop().expect("Expected source key for IMPORT");
+                                let module_name_val = local_stack.pop().expect("Expected module name for IMPORT");
+                                let module_name = match module_name_val { Value::Str(s)=>s, _=> return Err("IMPORT: first argument must be a string (module name)".to_string()) };
+                                let src_key = match src_key_val { Value::Str(s)=> s, _=> return Err("IMPORT: source key must be a string".to_string()) };
+                                load_module_from_key(local_env, &src_key)?;
+                                let module_key = format!("__module_{}", module_name);
+                                let module_val = local_env.get(&module_key).ok_or_else(|| format!("IMPORT: module '{}' not found after loading '{}'", module_name, src_key))?;
+                                let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
+                                let mut count = 0;
+                                for pair in exports_box.into_iter() {
+                                    if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); local_env.insert(key.clone(), val); count+=1; } } }
+                                }
+                                local_stack.push(Value::Str(format!("Module '{}' imported with {} exports", module_name, count)));
+                            }
+                            _ => return Err("IMPORT expects 1 or 2 arguments".to_string()),
+                        }
+                    }
+                    "ship" => {
+                        if *arg_count != 1 { return Err("SHIP expects exactly 1 argument".to_string()); }
+                        let arg = local_stack.pop().expect("Expected argument for SHIP");
+                        let (module_name, module_exports): (String, HashMap<String, Value>) = match arg {
+                            Value::Str(s) => {
+                                let mut exports = HashMap::new();
+                                for (key, value) in local_env.iter() {
+                                    if !key.starts_with("__") &&
+                                       !["box","pack","place","unpack","pick","count","print",
+                                         "result","string","read","write","fission","fusion",
+                                         "rewire_symbol","ship","import","source"].contains(&key.as_str()) {
+                                        exports.insert(key.clone(), value.clone());
+                                    }
+                                }
+                                (s, exports)
+                            }
+                            Value::Function { name, params, body, .. } => {
+                                if !params.is_empty() { return Err("SHIP: function argument must take 0 parameters".to_string()); }
+                                let mut module_env = local_env.clone();
+                                let mut tmp_stack: Vec<Value> = Vec::new();
+                                let _ = execute_function(&body, &mut tmp_stack, &mut module_env)?;
+                                let mut exports = HashMap::new();
+                                for (key, value) in module_env.iter() {
+                                    if !key.starts_with("__") &&
+                                       !["box","pack","place","unpack","pick","count","print",
+                                         "result","string","read","write","fission","fusion",
+                                         "rewire_symbol","ship","import","source"].contains(&key.as_str()) {
+                                        match local_env.get(key) { Some(old) if old == value => {}, _ => { exports.insert(key.clone(), value.clone()); } }
+                                    }
+                                }
+                                (name, exports)
+                            }
+                            _ => return Err("SHIP: module must be a string or function".to_string()),
+                        };
+
+                        let mut pairs: Vec<Value> = Vec::new();
+                        for (k, v) in module_exports.iter() { pairs.push(Value::Box(vec![Value::Str(k.clone()), v.clone()])); }
+                        let module_key = format!("__module_{}", module_name);
+                        local_env.insert(module_key, Value::Box(vec![ Value::Str(module_name.clone()), Value::Box(pairs) ]));
+                        local_stack.push(Value::Str(format!("Module '{}' shipped with {} exports", module_name, module_exports.len())));
+                    }
                     "result" => {
                         if *arg_count != 1 { return Err("RESULT expects exactly 1 argument".to_string()); }
                         let func_value = local_stack.pop().expect("Expected function for RESULT");
@@ -401,7 +539,19 @@ fn execute_function(
                         match arg { Value::Box(contents) => local_stack.push(Value::Int(contents.len() as i64)), Value::Str(s) => local_stack.push(Value::Int(s.chars().count() as i64)), Value::Function { name: _n, params, body: _b, .. } => local_stack.push(Value::Int(params.len() as i64)), _ => return Err("COUNT expects box, string, or function".to_string()) }
                     }
                     _ => {
-                        match func { Value::Function { name, params, body, .. } => { if params.len() != *arg_count { return Err(format!("Function '{}' expects {} arguments, got {}", name, params.len(), arg_count)); } let body_clone = body.clone(); let mut env_copy = local_env.clone(); let result = execute_function(&body_clone, &mut local_stack, &mut env_copy)?; local_stack.push(result); }
+                        match func {
+                            Value::Function { name, params, body, .. } => {
+                                if params.len() != *arg_count { return Err(format!("Function '{}' expects {} arguments, got {}", name, params.len(), arg_count)); }
+                                // Pop args and bind to params in a cloned env
+                                let mut args = Vec::with_capacity(*arg_count);
+                                for _ in 0..*arg_count { args.push(local_stack.pop().expect("Missing argument")); }
+                                args.reverse();
+                                let mut env_copy = local_env.clone();
+                                for (i, p) in params.iter().enumerate() { env_copy.insert(p.clone(), args[i].clone()); }
+                                let body_clone = body.clone();
+                                let result = execute_function(&body_clone, &mut local_stack, &mut env_copy)?;
+                                local_stack.push(result);
+                            }
                             _ => return Err(format!("'{}' is not a function", func_name)),
                         }
                     }
@@ -656,6 +806,12 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
         body: vec![],
         rewire_target: None,
     });
+    env.insert("source".to_string(), Value::Function {
+        name: "source".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
     env.insert("fission".to_string(), Value::Function {
         name: "fission".to_string(),
         params: vec![],
@@ -690,6 +846,22 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
             rewire_target: None,
         });
     }
+    
+    // Add ship function
+    env.insert("ship".to_string(), Value::Function {
+        name: "ship".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    // Add import function
+    env.insert("import".to_string(), Value::Function {
+        name: "import".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    
     // Math constants
     env.insert("PI".to_string(), Value::Float(std::f64::consts::PI));
     env.insert("TAU".to_string(), Value::Float(std::f64::consts::TAU));
@@ -1131,6 +1303,14 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                         }
                         stack.push(Value::Box(vec![]));
                     }
+                    "source" => {
+                        if *arg_count != 1 { return Err("SOURCE expects exactly 1 argument".to_string()); }
+                        let filename = stack.pop().expect("Expected filename for SOURCE");
+                        let path = match filename { Value::Str(s) => s, _ => return Err("SOURCE filename must be a string".to_string()) };
+                        let content = match std::fs::read_to_string(&path) { Ok(s) => s, Err(e) => return Err(format!("SOURCE error: {}", e)) };
+                        let result = eval_snippet(&mut env, &content)?;
+                        stack.push(result);
+                    }
                     "rewire_symbol" => {
                         if *arg_count != 1 { return Err("REWIRE expects exactly 1 argument".to_string()); }
                         let name_val = stack.pop().expect("Expected symbol name for REWIRE");
@@ -1313,6 +1493,105 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                         let joined = items.join(&delim);
                         stack.push(Value::Str(joined));
                     }
+                    "ship" => {
+                        if *arg_count != 1 { return Err("SHIP expects exactly 1 argument".to_string()); }
+                        let arg = stack.pop().expect("Expected argument for SHIP");
+                        // Determine module name and how to collect exports
+                        let (module_name, module_exports): (String, HashMap<String, Value>) = match arg {
+                            Value::Str(s) => {
+                                // Ship current environment under the given name
+                                let mut exports = HashMap::new();
+                                for (key, value) in env.iter() {
+                                    if !key.starts_with("__") &&
+                                       !["box","pack","place","unpack","pick","count","print",
+                                         "result","string","read","write","fission","fusion",
+                                         "rewire_symbol","ship","import"].contains(&key.as_str()) {
+                                        exports.insert(key.clone(), value.clone());
+                                    }
+                                }
+                                (s, exports)
+                            }
+                            Value::Function { name, params, body, .. } => {
+                                if !params.is_empty() {
+                                    return Err("SHIP: function argument must take 0 parameters".to_string());
+                                }
+                                // Execute the factory in a cloned environment to collect its definitions
+                                let mut module_env = env.clone();
+                                let mut tmp_stack: Vec<Value> = Vec::new();
+                                let _ = execute_function(&body, &mut tmp_stack, &mut module_env)?;
+                                // Diff module_env against env to get new/changed definitions
+                                let mut exports = HashMap::new();
+                                for (key, value) in module_env.iter() {
+                                    if !key.starts_with("__") &&
+                                       !["box","pack","place","unpack","pick","count","print",
+                                         "result","string","read","write","fission","fusion",
+                                         "rewire_symbol","ship","import"].contains(&key.as_str()) {
+                                        match env.get(key) {
+                                            Some(old) if old == value => { /* unchanged; skip */ }
+                                            _ => { exports.insert(key.clone(), value.clone()); }
+                                        }
+                                    }
+                                }
+                                (name, exports)
+                            }
+                            _ => return Err("SHIP: module must be a string or function".to_string()),
+                        };
+
+                        // Convert exports to a boxed representation: [Str name, Box [ Box([Str key, value]), ... ]]
+                        let mut pairs: Vec<Value> = Vec::new();
+                        for (k, v) in module_exports.iter() {
+                            pairs.push(Value::Box(vec![Value::Str(k.clone()), v.clone()]));
+                        }
+                        let module_key = format!("__module_{}", module_name);
+                        env.insert(module_key, Value::Box(vec![
+                            Value::Str(module_name.clone()),
+                            Value::Box(pairs.clone()),
+                        ]));
+
+                        stack.push(Value::Str(format!("Module '{}' shipped with {} exports", module_name, module_exports.len())));
+                    }
+                    "import" => {
+                        match *arg_count {
+                            1 => {
+                                let arg = stack.pop().expect("Expected argument for IMPORT");
+                                let module_name = match arg {
+                                    Value::Str(s) => s,
+                                    Value::Function { name, params, .. } => {
+                                        if !params.is_empty() { return Err("IMPORT: function argument must take 0 parameters".to_string()); }
+                                        name
+                                    }
+                                    _ => return Err("IMPORT: module must be a string or function".to_string()),
+                                };
+                                let module_key = format!("__module_{}", module_name);
+                                let module_val = env.get(&module_key).ok_or_else(|| format!("IMPORT: module '{}' not found", module_name))?;
+                                let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
+                                let mut count = 0;
+                                for pair in exports_box.into_iter() {
+                                    if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); env.insert(key.clone(), val); count+=1; } } }
+                                }
+                                stack.push(Value::Str(format!("Module '{}' imported with {} exports", module_name, count)));
+                            }
+                            2 => {
+                                // import(name) <- src_key
+                                let src_key_val = stack.pop().expect("Expected source key for IMPORT");
+                                let module_name_val = stack.pop().expect("Expected module name for IMPORT");
+                                let module_name = match module_name_val { Value::Str(s)=>s, _=> return Err("IMPORT: first argument must be a string (module name)".to_string()) };
+                                let src_key = match src_key_val { Value::Str(s)=> s, _=> return Err("IMPORT: source key must be a string".to_string()) };
+                                // Load module file via manifest or filepath
+                                load_module_from_key(&mut env, &src_key)?;
+                                // Now import by module name
+                                let module_key = format!("__module_{}", module_name);
+                                let module_val = env.get(&module_key).ok_or_else(|| format!("IMPORT: module '{}' not found after loading '{}'", module_name, src_key))?;
+                                let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
+                                let mut count = 0;
+                                for pair in exports_box.into_iter() {
+                                    if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); env.insert(key.clone(), val); count+=1; } } }
+                                }
+                                stack.push(Value::Str(format!("Module '{}' imported with {} exports", module_name, count)));
+                            }
+                            _ => return Err("IMPORT expects 1 or 2 arguments".to_string()),
+                        }
+                    }
                     "count" => {
                         if *arg_count != 1 {
                             return Err("COUNT expects exactly 1 argument".to_string());
@@ -1362,15 +1641,20 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                         }
                     }
                     _ => {
-                        // Handle user-defined functions (pure by default): run in cloned env
+                        // Handle user-defined functions (pure by default): bind args, run in cloned env
                         match func {
                             Value::Function { name, params, body, .. } => {
                                 if params.len() != *arg_count {
                                     return Err(format!("Function '{}' expects {} arguments, got {}", 
                                         name, params.len(), arg_count));
                                 }
-                                let body_clone = body.clone();
+                                // Pop arguments (reverse order) then bind to parameter names
+                                let mut args = Vec::with_capacity(*arg_count);
+                                for _ in 0..*arg_count { args.push(stack.pop().expect("Missing argument")); }
+                                args.reverse();
                                 let mut env_clone = env.clone();
+                                for (i, p) in params.iter().enumerate() { env_clone.insert(p.clone(), args[i].clone()); }
+                                let body_clone = body.clone();
                                 let result = execute_function(&body_clone, &mut stack, &mut env_clone)?;
                                 stack.push(result);
                             }

@@ -33,6 +33,7 @@ A concise, complete reference to the Scraps language as implemented in this VM.
   - [Mutable Operations (variable)](#mutable-operations-variable)
   - [Dynamic Symbol Binding (string)](#dynamic-symbol-binding-string)
 - [String as Code](#string-as-code)
+- [Modules](#modules)
 - [Semantics & Errors](#semantics--errors)
 - [Complete Examples](#complete-examples)
 - [Quick Reference](#quick-reference)
@@ -465,3 +466,32 @@ print fusion("") -> s2           # Hello World
 ---
 
 This manual documents all features supported by the VM, with examples and semantics to guide correct usage.
+
+## Modules
+
+Ship a set of definitions as a module, then import them later.
+
+- ship("Name"): snapshots the current environment (excluding built‑ins) under module Name.
+- ship(factory_fn): executes a zero‑arg function to build a module; exports are any new or changed definitions from its body; the module name is the function’s name.
+- import("Name" | factory_fn): loads the module and injects its exports into the current environment (overwrites existing bindings).
+
+Examples:
+
+```scraps
+# Function‑based module
+fn(use()) {
+  fn(use(x)) { x * 2 } -> double
+  PI = 3.14159
+} -> create_math_module
+ship(create_math_module)
+import(create_math_module)
+print double(10)   # 20
+
+# Snapshot current env as a module
+fn(use(x)) { x + 10 } -> add10
+ANSWER = 42
+ship("Utils")
+ANSWER = 0
+import("Utils")
+print ANSWER       # 42
+```

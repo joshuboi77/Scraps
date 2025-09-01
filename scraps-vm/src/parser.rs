@@ -178,6 +178,7 @@ impl Parser {
     
     fn statement(&mut self) -> Result<Stmt, String> {
         let token = self.peek();
+        println!("DEBUG: Parsing statement, token: {:?} '{}' at line {}", token.kind, token.lexeme, token.line);
         
         match token.kind {
             // Keywords
@@ -291,10 +292,13 @@ impl Parser {
                     }
                     
                     _ => {
+                        println!("DEBUG: Identifier '{}' not a keyword, checking if assignment", name);
                         // Check if it's an assignment
                         if self.peek_next().kind == TokenKind::Equal {
+                            println!("DEBUG: It's an assignment");
                             self.assignment_statement()
                         } else {
+                            println!("DEBUG: It's an expression statement");
                             // Expression statement
                             let expr = self.expression()?;
                             Ok(Stmt::Expression(expr))
@@ -338,6 +342,7 @@ impl Parser {
     }
     
     fn parse_expression(&mut self, min_precedence: u8) -> Result<Expr, String> {
+        println!("DEBUG: parse_expression() - min_precedence: {}", min_precedence);
         let mut left = self.parse_prefix()?;
         
         // Handle postfix arrow operations (like unpack(...) <- box)
@@ -363,7 +368,7 @@ impl Parser {
     
     fn parse_prefix(&mut self) -> Result<Expr, String> {
         let token = self.peek();
-        // debug removed
+        println!("DEBUG: parse_prefix() - token: {:?} '{}'", token.kind, token.lexeme);
         
         match token.kind {
             // STEP prefix: :.(head) used as either an UNPACK expression or sugar for stepped PICK
@@ -543,6 +548,34 @@ impl Parser {
                     if let Expr::FunctionCall { function, arguments } = &left {
                         if let Expr::Variable(name) = &**function {
                             match name.as_str() {
+                                "import" | "IMPORT" => {
+                                    // Support: import(name) <- src
+                                    self.advance(); // consume '<-'
+                                    let mut src_expr = self.expression()?;
+
+                                    // If src is a bare identifier, treat it as a string key
+                                    if let Expr::Variable(var_name) = src_expr {
+                                        src_expr = Expr::String(var_name);
+                                    }
+
+                                    // Ensure we have a module name as first argument; if it's an identifier, treat as string
+                                    let mut new_args: Vec<Expr> = Vec::new();
+                                    if arguments.len() == 0 {
+                                        return Err("IMPORT expects module name before '<-'".to_string());
+                                    }
+                                    let mut name_expr = arguments[0].clone();
+                                    if let Expr::Variable(n) = name_expr {
+                                        name_expr = Expr::String(n);
+                                    }
+                                    new_args.push(name_expr);
+                                    new_args.push(src_expr);
+
+                                    left = Expr::FunctionCall {
+                                        function: Box::new(Expr::Variable("import".to_string())),
+                                        arguments: new_args,
+                                    };
+                                    continue;
+                                }
                                 "unpack" | "UNPACK" => {
                                     self.advance(); // consume '<-'
                                     let box_expr = self.expression()?;
@@ -729,29 +762,40 @@ impl Parser {
     }
     
     fn block(&mut self) -> Result<Block, String> {
+        println!("DEBUG: Starting block parsing");
         self.expect(TokenKind::LeftBrace, "Expected '{' to start block")?;
-        
+
         let mut statements = Vec::new();
-        
-        while !self.is_at_end() && !self.match_token(TokenKind::RightBrace) {
-            // Skip newlines
+
+        // Parse statements until we see a closing '}'
+        while !self.is_at_end() && !self.check(TokenKind::RightBrace) {
+            println!("DEBUG: Block parsing - current token: {:?} '{}'", self.peek().kind, self.peek().lexeme);
+            // Skip leading newlines between statements
             while self.match_token(TokenKind::Newline) {
                 // consume newline
             }
-            
+
             if self.is_at_end() {
                 return Err("Unterminated block - missing '}'".to_string());
             }
-            
+
+            // If we arrived at a '}', end the block (don't consume here)
+            if self.check(TokenKind::RightBrace) {
+                break;
+            }
+
             let stmt = self.statement()?;
             statements.push(stmt);
-            
-            // Require newline or } after each statement
-            if !self.match_token(TokenKind::Newline) && !self.match_token(TokenKind::RightBrace) {
-                return Err("Expected newline or '}' after statement in block".to_string());
+
+            // Consume any trailing newlines after the statement; do not consume '}' here.
+            while self.match_token(TokenKind::Newline) {
+                // consume newline(s)
             }
         }
-        
+
+        // Now consume the closing '}' for this block
+        self.expect(TokenKind::RightBrace, "Expected '}' to end block")?;
+
         Ok(Block { statements })
     }
     
@@ -795,6 +839,7 @@ impl Parser {
     }
     
     fn function_definition(&mut self) -> Result<Stmt, String> {
+        println!("DEBUG: Starting function definition");
         self.expect(TokenKind::LeftParen, "Expected '(' after fn")?;
         
         // Parse use(params)
@@ -821,10 +866,14 @@ impl Parser {
         
         let body = self.block()?;
         
+        println!("DEBUG: Checking for arrow after function body");
         let name = if self.match_token(TokenKind::ArrowRight) {
+            println!("DEBUG: Found arrow, expecting function name");
             let dest = self.expect(TokenKind::Identifier, "Expected function name after ->")?;
+            println!("DEBUG: Function name: {}", dest.lexeme);
             dest.lexeme.clone()
         } else {
+            println!("DEBUG: No arrow found, using anonymous name");
             "_anon".to_string()
         };
         
@@ -1066,10 +1115,13 @@ impl Parser {
     }
     
     fn match_token(&mut self, kind: TokenKind) -> bool {
+        println!("DEBUG: match_token() - looking for {:?}, got {:?} '{}'", kind, self.peek().kind, self.peek().lexeme);
         if self.check(kind) {
             self.advance();
+            println!("DEBUG: match_token() - matched and advanced");
             true
         } else {
+            println!("DEBUG: match_token() - no match");
             false
         }
     }
@@ -1092,6 +1144,7 @@ impl Parser {
     }
     
     fn expect(&mut self, kind: TokenKind, message: &str) -> Result<&Token, String> {
+        println!("DEBUG: expect() - looking for {:?}, got {:?} '{}'", kind, self.peek().kind, self.peek().lexeme);
         if self.check(kind) {
             Ok(self.advance())
         } else {
