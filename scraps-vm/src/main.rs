@@ -15,22 +15,30 @@ use std::env;
 fn main() {
     // Collect command-line arguments
     let args: Vec<String> = env::args().collect();
-    
+    let mut i = 1;
+
     if args.len() < 2 {
         eprintln!("Usage: scraps-vm <source.scraps>");
         eprintln!("Or: scraps-vm --lex <source.scraps> to test lexer");
         eprintln!("Or: scraps-vm --parse <source.scraps> to test parser");
+        eprintln!("Flags: --debug to enable verbose parser logging");
         std::process::exit(1);
     }
-    
-    if args[1] == "--lex" {
-        if args.len() < 3 {
+
+    // Optional debug flag first
+    if i < args.len() && args[i] == "--debug" {
+        parser::set_debug_enabled(true);
+        i += 1;
+    }
+
+    if i < args.len() && args[i] == "--lex" {
+        if args.len() < i + 2 {
             eprintln!("Usage: scraps-vm --lex <source.scraps>");
             std::process::exit(1);
         }
         
         // Test lexer
-        let filename = &args[2];
+        let filename = &args[i + 1];
         let source = fs::read_to_string(filename)
             .expect("Failed to read source file");
         
@@ -47,14 +55,14 @@ fn main() {
         return;
     }
     
-    if args[1] == "--parse" {
-        if args.len() < 3 {
+    if i < args.len() && args[i] == "--parse" {
+        if args.len() < i + 2 {
             eprintln!("Usage: scraps-vm --parse <source.scraps>");
             std::process::exit(1);
         }
         
         // Test parser
-        let filename = &args[2];
+        let filename = &args[i + 1];
         let source = fs::read_to_string(filename)
             .expect("Failed to read source file");
         
@@ -79,7 +87,11 @@ fn main() {
     }
     
     // Normal execution
-    let filename = &args[1];
+    if i >= args.len() {
+        eprintln!("Usage: scraps-vm [--debug] <source.scraps>");
+        std::process::exit(1);
+    }
+    let filename = &args[i];
     let source = fs::read_to_string(filename)
         .expect("Failed to read source file");
 

@@ -1,0 +1,7 @@
+[modules]
+module_a = "module_a.scraps"
+module_b = "module_b.scraps"
+
+[paths]
+sources = "void"
+

@@ -217,6 +217,14 @@ impl Compiler {
                 self.program.push(OpCode::PushStr("fusion".to_string()));
                 self.program.push(OpCode::Call("".to_string(), 2));
             }
+
+            Stmt::Rename { from, to } => {
+                // Compile as built-in function call: rename(from, to)
+                self.compile_expression(from);
+                self.compile_expression(to);
+                self.program.push(OpCode::PushStr("rename".to_string()));
+                self.program.push(OpCode::Call("".to_string(), 2));
+            }
         }
     }
 

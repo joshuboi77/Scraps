@@ -8,6 +8,7 @@ use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::compiler::Compiler;
 use std::fs;
+use std::path::{Path, PathBuf};
 
 const REWIRED_KEY: &str = "__rewired__";
 
@@ -43,10 +44,8 @@ fn eval_snippet(env: &mut HashMap<String, Value>, src: &str) -> Result<Value, St
     execute_function(&bytecode, &mut stack, env)
 }
 
-fn read_modules_manifest() -> HashMap<String, String> {
+fn parse_modules_manifest(content: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
-    let path = "Scraps.toml";
-    let content = match fs::read_to_string(path) { Ok(s) => s, Err(_) => return map };
     let mut in_modules = false;
     for line in content.lines() {
         let t = line.trim();
@@ -68,15 +67,96 @@ fn read_modules_manifest() -> HashMap<String, String> {
     map
 }
 
-fn load_module_from_key(env: &mut HashMap<String, Value>, key: &str) -> Result<(), String> {
-    // Lookup in Scraps.toml [modules]
-    let manifest = read_modules_manifest();
-    if let Some(path) = manifest.get(key) {
-        let code = fs::read_to_string(path).map_err(|e| format!("SOURCE error: {}", e))?;
-        let _ = eval_snippet(env, &code)?;
-        return Ok(());
+fn read_modules_manifest_from(path: &Path) -> HashMap<String, String> {
+    match fs::read_to_string(path) { Ok(s) => parse_modules_manifest(&s), Err(_) => HashMap::new() }
+}
+
+fn find_upwards(start: &Path, filename: &str) -> Option<PathBuf> {
+    let mut p = start.to_path_buf();
+    let fname = Path::new(filename);
+    loop {
+        let candidate = p.join(fname);
+        if candidate.exists() { return Some(candidate); }
+        if !p.pop() { break; }
     }
-    // Fallback: treat key as a direct filepath
+    None
+}
+
+fn read_clanker_manifest() -> Option<(PathBuf, HashMap<String, String>, Option<String>)> {
+    // 0) Explicit override via env var IGNITE (file or directory containing clanker.toml)
+    if let Ok(path_str) = std::env::var("IGNITE") {
+        let p = PathBuf::from(path_str);
+        let cfg_path = if p.is_dir() { p.join("clanker.toml") } else { p };
+        if let Ok(content) = fs::read_to_string(&cfg_path) {
+            let modules = parse_modules_manifest(&content);
+            let mut sources_dir: Option<String> = None;
+            for line in content.lines() {
+                let t = line.trim();
+                if t.starts_with("sources") && t.contains('=') {
+                    if let Some(eq) = t.find('=') {
+                        let mut val = t[eq+1..].trim().to_string();
+                        if val.starts_with('"') && val.ends_with('"') && val.len() >= 2 {
+                            val = val[1..val.len()-1].to_string();
+                        }
+                        if !val.is_empty() { sources_dir = Some(val); }
+                    }
+                }
+            }
+            return Some((cfg_path.parent().unwrap_or(Path::new(".")).to_path_buf(), modules, sources_dir));
+        }
+    }
+
+    // 1) Search for clanker.toml upwards from CWD
+    let cwd = std::env::current_dir().ok()?;
+    let cfg_path = find_upwards(&cwd, "clanker.toml")?;
+    let content = fs::read_to_string(&cfg_path).ok()?;
+    let modules = parse_modules_manifest(&content);
+    // Optional [paths] sources = "void"
+    let mut sources_dir: Option<String> = None;
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with("sources") && t.contains('=') {
+            if let Some(eq) = t.find('=') {
+                let mut val = t[eq+1..].trim().to_string();
+                if val.starts_with('"') && val.ends_with('"') && val.len() >= 2 {
+                    val = val[1..val.len()-1].to_string();
+                }
+                if !val.is_empty() { sources_dir = Some(val); }
+            }
+        }
+    }
+    Some((cfg_path.parent().unwrap_or(Path::new(".")).to_path_buf(), modules, sources_dir))
+}
+
+fn read_scraps_manifest() -> Option<(PathBuf, HashMap<String, String>)> {
+    let cwd = std::env::current_dir().ok()?;
+    let path = find_upwards(&cwd, "Scraps.toml")?;
+    let map = read_modules_manifest_from(&path);
+    Some((path.parent().unwrap_or(Path::new(".")).to_path_buf(), map))
+}
+
+fn load_module_from_key(env: &mut HashMap<String, Value>, key: &str) -> Result<(), String> {
+    // 1) clanker.toml support (preferred)
+    if let Some((base_dir, modules, sources_dir)) = read_clanker_manifest() {
+        if let Some(rel) = modules.get(key) {
+            let candidate = if let Some(sdir) = &sources_dir { base_dir.join(sdir).join(rel) } else { base_dir.join(rel) };
+            let code = fs::read_to_string(&candidate)
+                .map_err(|e| format!("SOURCE error: {} (path: {:?})", e, candidate))?;
+            let _ = eval_snippet(env, &code)?;
+            return Ok(());
+        }
+    }
+    // 2) Scraps.toml fallback
+    if let Some((base_dir, manifest)) = read_scraps_manifest() {
+        if let Some(rel) = manifest.get(key) {
+            let candidate = base_dir.join(rel);
+            let code = fs::read_to_string(&candidate)
+                .map_err(|e| format!("SOURCE error: {} (path: {:?})", e, candidate))?;
+            let _ = eval_snippet(env, &code)?;
+            return Ok(());
+        }
+    }
+    // 3) Direct filepath
     let code = fs::read_to_string(key).map_err(|_| format!("IMPORT: module key '{}' not found and file '{}' unreadable", key, key))?;
     let _ = eval_snippet(env, &code)?;
     Ok(())
@@ -271,42 +351,85 @@ fn execute_function(
                         local_stack.push(result);
                     }
                     "import" => {
-                        match *arg_count {
-                            1 => {
-                                let arg = local_stack.pop().expect("Expected argument for IMPORT");
-                                let module_name = match arg {
-                                    Value::Str(s) => s,
-                                    Value::Function { name, params, .. } => {
-                                        if !params.is_empty() { return Err("IMPORT: function argument must take 0 parameters".to_string()); }
-                                        name
+                        if *arg_count == 1 {
+                            let arg = local_stack.pop().expect("Expected argument for IMPORT");
+                            match arg {
+                                Value::Function { name, params, .. } => {
+                                    if !params.is_empty() { return Err("IMPORT: function argument must take 0 parameters".to_string()); }
+                                    let module_key = format!("__module_{}", name);
+                                    let module_val = local_env.get(&module_key).ok_or_else(|| format!("IMPORT: module '{}' not found", name))?;
+                                    let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
+                                    let mut count = 0; for pair in exports_box.into_iter() { if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); local_env.insert(key.clone(), val); count+=1; } } } }
+                                    local_stack.push(Value::Str(format!("Module '{}' imported with {} exports", name, count)));
+                                }
+                                Value::Str(s) => {
+                                    let module_key = format!("__module_{}", s);
+                                    if let Some(module_val) = local_env.get(&module_key) {
+                                        let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
+                                        let mut count = 0; for pair in exports_box.into_iter() { if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); local_env.insert(key.clone(), val); count+=1; } } } }
+                                        local_stack.push(Value::Str(format!("Module '{}' imported with {} exports", s, count)));
+                                    } else {
+                                        let pre: Vec<String> = local_env.keys().filter(|k| k.starts_with("__module_")).cloned().collect();
+                                        load_module_from_key(local_env, &s)?;
+                                        let post: Vec<String> = local_env.keys().filter(|k| k.starts_with("__module_")).cloned().collect();
+                                        let new_modules: Vec<String> = post.into_iter().filter(|k| !pre.contains(k)).collect();
+                                        let mut total = 0;
+                                        for mk in new_modules {
+                                            if let Some(module_val) = local_env.get(&mk) {
+                                                let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
+                                                for pair in exports_box.into_iter() { if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); local_env.insert(key.clone(), val); total+=1; } } } }
+                                            }
+                                        }
+                                        local_stack.push(Value::Str(format!("Imported {} exports from '{}'", total, s)));
                                     }
-                                    _ => return Err("IMPORT: module must be a string or function".to_string()),
-                                };
-                                let module_key = format!("__module_{}", module_name);
-                                let module_val = local_env.get(&module_key).ok_or_else(|| format!("IMPORT: module '{}' not found", module_name))?;
-                                let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
-                                let mut count = 0;
-                                for pair in exports_box.into_iter() {
-                                    if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); local_env.insert(key.clone(), val); count+=1; } } }
                                 }
-                                local_stack.push(Value::Str(format!("Module '{}' imported with {} exports", module_name, count)));
+                                _ => return Err("IMPORT: argument must be a string or function".to_string()),
                             }
-                            2 => {
-                                let src_key_val = local_stack.pop().expect("Expected source key for IMPORT");
-                                let module_name_val = local_stack.pop().expect("Expected module name for IMPORT");
-                                let module_name = match module_name_val { Value::Str(s)=>s, _=> return Err("IMPORT: first argument must be a string (module name)".to_string()) };
-                                let src_key = match src_key_val { Value::Str(s)=> s, _=> return Err("IMPORT: source key must be a string".to_string()) };
-                                load_module_from_key(local_env, &src_key)?;
-                                let module_key = format!("__module_{}", module_name);
-                                let module_val = local_env.get(&module_key).ok_or_else(|| format!("IMPORT: module '{}' not found after loading '{}'", module_name, src_key))?;
-                                let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
-                                let mut count = 0;
-                                for pair in exports_box.into_iter() {
-                                    if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); local_env.insert(key.clone(), val); count+=1; } } }
+                        } else if *arg_count >= 2 {
+                            let src_key_val = local_stack.pop().expect("Expected source key for IMPORT");
+                            let src_key = match src_key_val { Value::Str(s)=> s, _=> return Err("IMPORT: source key must be a string".to_string()) };
+                            let mut selectors: Vec<String> = Vec::new();
+                            for _ in 0..(*arg_count - 1) { match local_stack.pop().expect("Expected selector") { Value::Str(s)=> selectors.push(s), _=> return Err("IMPORT: selectors must be strings".to_string()) } }
+                            selectors.reverse();
+                            let pre: Vec<String> = local_env.keys().filter(|k| k.starts_with("__module_")).cloned().collect();
+                            load_module_from_key(local_env, &src_key)?;
+                            let post: Vec<String> = local_env.keys().filter(|k| k.starts_with("__module_")).cloned().collect();
+                            let new_modules: Vec<String> = post.into_iter().filter(|k| !pre.contains(k)).collect();
+                            if selectors.len() == 1 {
+                                let module_name = &selectors[0];
+                                let mk = format!("__module_{}", module_name);
+                                if local_env.contains_key(&mk) {
+                                    let module_val = local_env.get(&mk).unwrap();
+                                    let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
+                                    let mut count = 0; for pair in exports_box.into_iter() { if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); local_env.insert(key.clone(), val); count+=1; } } } }
+                                    local_stack.push(Value::Str(format!("Module '{}' imported with {} exports", module_name, count)));
+                                    return Ok(Value::None);
+                                } else if !new_modules.is_empty() {
+                                    // Alias the first newly loaded module to the requested name, then import
+                                    let old_mk = new_modules[0].clone();
+                                    if let Some(mut module_val) = local_env.remove(&old_mk) {
+                                        if let Value::Box(ref mut items) = module_val { if !items.is_empty() { items[0] = Value::Str(module_name.clone()); } }
+                                        local_env.insert(mk.clone(), module_val);
+                                        if let Some(module_val2) = local_env.get(&mk) {
+                                            let exports_box = match module_val2 { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
+                                            let mut count = 0; for pair in exports_box.into_iter() { if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); local_env.insert(key.clone(), val); count+=1; } } } }
+                                            local_stack.push(Value::Str(format!("Module '{}' imported with {} exports", module_name, count)));
+                                            return Ok(Value::None);
+                                        }
+                                    }
                                 }
-                                local_stack.push(Value::Str(format!("Module '{}' imported with {} exports", module_name, count)));
                             }
-                            _ => return Err("IMPORT expects 1 or 2 arguments".to_string()),
+                            let module_keys = if new_modules.is_empty() { pre } else { new_modules };
+                            let mut count = 0;
+                            for mk in module_keys {
+                                if let Some(module_val) = local_env.get(&mk) {
+                                    let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
+                                    for pair in exports_box.into_iter() { if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { if selectors.contains(key) { let val = kv[1].clone(); local_env.insert(key.clone(), val); count+=1; } } } } }
+                                }
+                            }
+                            local_stack.push(Value::Str(format!("Imported {} selected exports from '{}'", count, src_key)));
+                        } else {
+                            return Err("IMPORT expects at least 1 argument".to_string());
                         }
                     }
                     "ship" => {
@@ -532,6 +655,19 @@ fn execute_function(
                             _ => return Err("FUSION: second argument must be a box of strings".to_string()),
                         };
                         let joined = items.join(&delim); local_stack.push(Value::Str(joined));
+                    }
+                    "rename" => {
+                        if *arg_count != 2 { return Err("RENAME expects exactly 2 arguments".to_string()); }
+                        let to_val = local_stack.pop().expect("Expected destination name for RENAME");
+                        let from_val = local_stack.pop().expect("Expected source for RENAME");
+                        let from_name = match from_val { Value::Str(s) => s, Value::Function { name, .. } => name, _ => return Err("RENAME: first argument must be a string or function".to_string()) };
+                        let to_name = match to_val { Value::Str(s) => s, _ => return Err("RENAME: destination must be a string".to_string()) };
+                        let old_key = format!("__module_{}", from_name);
+                        let mut module_val = match local_env.remove(&old_key) { Some(v) => v, None => return Err(format!("RENAME: module '{}' not found", from_name)) };
+                        if let Value::Box(ref mut items) = module_val { if !items.is_empty() { items[0] = Value::Str(to_name.clone()); } }
+                        let new_key = format!("__module_{}", to_name);
+                        local_env.insert(new_key, module_val);
+                        local_stack.push(Value::Str("OK".to_string()));
                     }
                     "count" => {
                         if *arg_count != 1 { return Err("COUNT expects exactly 1 argument".to_string()); }
@@ -820,6 +956,12 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
     });
     env.insert("fusion".to_string(), Value::Function {
         name: "fusion".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("rename".to_string(), Value::Function {
+        name: "rename".to_string(),
         params: vec![],
         body: vec![],
         rewire_target: None,
@@ -1493,6 +1635,19 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                         let joined = items.join(&delim);
                         stack.push(Value::Str(joined));
                     }
+                    "rename" => {
+                        if *arg_count != 2 { return Err("RENAME expects exactly 2 arguments".to_string()); }
+                        let to_val = stack.pop().expect("Expected destination name for RENAME");
+                        let from_val = stack.pop().expect("Expected source for RENAME");
+                        let from_name = match from_val { Value::Str(s) => s, Value::Function { name, .. } => name, _ => return Err("RENAME: first argument must be a string or function".to_string()) };
+                        let to_name = match to_val { Value::Str(s) => s, _ => return Err("RENAME: destination must be a string".to_string()) };
+                        let old_key = format!("__module_{}", from_name);
+                        let mut module_val = match env.remove(&old_key) { Some(v) => v, None => return Err(format!("RENAME: module '{}' not found", from_name)) };
+                        if let Value::Box(ref mut items) = module_val { if !items.is_empty() { items[0] = Value::Str(to_name.clone()); } }
+                        let new_key = format!("__module_{}", to_name);
+                        env.insert(new_key, module_val);
+                        stack.push(Value::Str("OK".to_string()));
+                    }
                     "ship" => {
                         if *arg_count != 1 { return Err("SHIP expects exactly 1 argument".to_string()); }
                         let arg = stack.pop().expect("Expected argument for SHIP");
@@ -1551,45 +1706,103 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                         stack.push(Value::Str(format!("Module '{}' shipped with {} exports", module_name, module_exports.len())));
                     }
                     "import" => {
-                        match *arg_count {
-                            1 => {
-                                let arg = stack.pop().expect("Expected argument for IMPORT");
-                                let module_name = match arg {
-                                    Value::Str(s) => s,
-                                    Value::Function { name, params, .. } => {
-                                        if !params.is_empty() { return Err("IMPORT: function argument must take 0 parameters".to_string()); }
-                                        name
+                        if *arg_count == 1 {
+                            // import(arg): if arg matches a module record, import it; else treat as source key and import all from loaded modules
+                            let arg = stack.pop().expect("Expected argument for IMPORT");
+                            match arg {
+                                Value::Function { name, params, .. } => {
+                                    if !params.is_empty() { return Err("IMPORT: function argument must take 0 parameters".to_string()); }
+                                    let module_key = format!("__module_{}", name);
+                                    let module_val = env.get(&module_key).ok_or_else(|| format!("IMPORT: module '{}' not found", name))?;
+                                    let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
+                                    let mut count = 0;
+                                    for pair in exports_box.into_iter() { if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); env.insert(key.clone(), val); count+=1; } } } }
+                                    stack.push(Value::Str(format!("Module '{}' imported with {} exports", name, count)));
+                                }
+                                Value::Str(s) => {
+                                    // Try existing module first
+                                    let module_key = format!("__module_{}", s);
+                                    if let Some(module_val) = env.get(&module_key) {
+                                        let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
+                                        let mut count = 0; for pair in exports_box.into_iter() { if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); env.insert(key.clone(), val); count+=1; } } } }
+                                        stack.push(Value::Str(format!("Module '{}' imported with {} exports", s, count)));
+                                    } else {
+                                        // Treat as source key; load and import all new modules
+                                        let pre: Vec<String> = env.keys().filter(|k| k.starts_with("__module_")).cloned().collect();
+                                        load_module_from_key(&mut env, &s)?;
+                                        let post: Vec<String> = env.keys().filter(|k| k.starts_with("__module_")).cloned().collect();
+                                        let mut new_modules: Vec<String> = post.into_iter().filter(|k| !pre.contains(k)).collect();
+                                        if new_modules.is_empty() { new_modules = pre; /* fallback: import existing if none new */ }
+                                        let mut total = 0;
+                                        for mk in new_modules {
+                                            if let Some(module_val) = env.get(&mk) {
+                                                let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
+                                                for pair in exports_box.into_iter() { if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); env.insert(key.clone(), val); total+=1; } } } }
+                                            }
+                                        }
+                                        stack.push(Value::Str(format!("Imported {} exports from '{}'", total, s)));
                                     }
-                                    _ => return Err("IMPORT: module must be a string or function".to_string()),
-                                };
-                                let module_key = format!("__module_{}", module_name);
-                                let module_val = env.get(&module_key).ok_or_else(|| format!("IMPORT: module '{}' not found", module_name))?;
-                                let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
-                                let mut count = 0;
-                                for pair in exports_box.into_iter() {
-                                    if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); env.insert(key.clone(), val); count+=1; } } }
                                 }
-                                stack.push(Value::Str(format!("Module '{}' imported with {} exports", module_name, count)));
+                                _ => return Err("IMPORT: argument must be a string or function".to_string()),
                             }
-                            2 => {
-                                // import(name) <- src_key
-                                let src_key_val = stack.pop().expect("Expected source key for IMPORT");
-                                let module_name_val = stack.pop().expect("Expected module name for IMPORT");
-                                let module_name = match module_name_val { Value::Str(s)=>s, _=> return Err("IMPORT: first argument must be a string (module name)".to_string()) };
-                                let src_key = match src_key_val { Value::Str(s)=> s, _=> return Err("IMPORT: source key must be a string".to_string()) };
-                                // Load module file via manifest or filepath
-                                load_module_from_key(&mut env, &src_key)?;
-                                // Now import by module name
-                                let module_key = format!("__module_{}", module_name);
-                                let module_val = env.get(&module_key).ok_or_else(|| format!("IMPORT: module '{}' not found after loading '{}'", module_name, src_key))?;
-                                let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
-                                let mut count = 0;
-                                for pair in exports_box.into_iter() {
-                                    if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); env.insert(key.clone(), val); count+=1; } } }
+                        } else if *arg_count >= 2 {
+                            // import(symbol1, symbol2, ..., src_key)
+                            let src_key_val = stack.pop().expect("Expected source key for IMPORT");
+                            let src_key = match src_key_val { Value::Str(s)=> s, _=> return Err("IMPORT: source key must be a string".to_string()) };
+                            // Collect selectors
+                            let mut selectors: Vec<String> = Vec::new();
+                            for _ in 0..(*arg_count - 1) {
+                                match stack.pop().expect("Expected selector") {
+                                    Value::Str(s) => selectors.push(s),
+                                    _ => return Err("IMPORT: selectors must be strings".to_string()),
                                 }
-                                stack.push(Value::Str(format!("Module '{}' imported with {} exports", module_name, count)));
                             }
-                            _ => return Err("IMPORT expects 1 or 2 arguments".to_string()),
+                            selectors.reverse();
+                            let pre: Vec<String> = env.keys().filter(|k| k.starts_with("__module_")).cloned().collect();
+                            load_module_from_key(&mut env, &src_key)?;
+                            let post: Vec<String> = env.keys().filter(|k| k.starts_with("__module_")).cloned().collect();
+                            let new_modules: Vec<String> = post.into_iter().filter(|k| !pre.contains(k)).collect();
+                            // If given exactly one selector matching a module name, import that module
+                            if selectors.len() == 1 {
+                                let module_name = &selectors[0];
+                                let mk = format!("__module_{}", module_name);
+                                if env.contains_key(&mk) {
+                                    let module_val = env.get(&mk).unwrap();
+                                    let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
+                                    let mut count = 0; for pair in exports_box.into_iter() { if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); env.insert(key.clone(), val); count+=1; } } } }
+                                    stack.push(Value::Str(format!("Module '{}' imported with {} exports", module_name, count)));
+                                    return Ok(());
+                                } else if !new_modules.is_empty() {
+                                    // Alias the first newly loaded module to the requested name, then import
+                                    let old_mk = new_modules[0].clone();
+                                    if let Some(mut module_val) = env.remove(&old_mk) {
+                                        if let Value::Box(ref mut items) = module_val { if !items.is_empty() { items[0] = Value::Str(module_name.clone()); } }
+                                        env.insert(mk.clone(), module_val);
+                                        if let Some(module_val2) = env.get(&mk) {
+                                            let exports_box = match module_val2 { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
+                                            let mut count = 0; for pair in exports_box.into_iter() { if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); env.insert(key.clone(), val); count+=1; } } } }
+                                            stack.push(Value::Str(format!("Module '{}' imported with {} exports", module_name, count)));
+                                            return Ok(());
+                                        }
+                                    }
+                                }
+                            }
+                            // Otherwise, import only selected symbols from newly loaded modules (or all modules if none detected)
+                            let module_keys = if new_modules.is_empty() { pre } else { new_modules };
+                            let mut count = 0;
+                            for mk in module_keys {
+                                if let Some(module_val) = env.get(&mk) {
+                                    let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
+                                    for pair in exports_box.into_iter() {
+                                        if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] {
+                                            if selectors.contains(key) { let val = kv[1].clone(); env.insert(key.clone(), val); count+=1; }
+                                        } } }
+                                    }
+                                }
+                            }
+                            stack.push(Value::Str(format!("Imported {} selected exports from '{}'", count, src_key)));
+                        } else {
+                            return Err("IMPORT expects at least 1 argument".to_string());
                         }
                     }
                     "count" => {
