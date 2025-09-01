@@ -143,25 +143,150 @@ print content                 # Hello
 
 ### Math Built-ins
 
-Provided as built-in functions (radians for trig):
+The Scraps VM provides comprehensive mathematical functions as built-in operations. All trigonometric functions use radians by default, with degree variants available.
 
-- Constants: `PI`, `TAU`, `E`
-- Scalars: `abs(x)`, `sign(x)`, `floor(x)`, `ceil(x)`, `round(x)`, `trunc(x)`
-- Powers/roots: `sqrt(x)`, `cbrt(x)`, `pow(x, y)`
-- Trigonometry: `sin(x)`, `cos(x)`, `tan(x)`, `asin(x)`, `acos(x)`, `atan(x)`, `atan2(y, x)`
-- Exponentials/logs: `exp(x)`, `ln(x)`, `log10(x)`, `log2(x)`
-- Utilities: `min(a, b)`, `max(a, b)`, `clamp(x, lo, hi)`, `hypot(x, y)`, `deg(x)`, `rad(x)`
-  - Extras: `mod(a, b)`, `div(a, b)`, `divmod(a, b)`, `pow_int(x, n)`, `frac(x)`, `nearly_equal(a, b, eps)`,
-    `sum(xs)`, `mean(xs)`, `dot(a, b)`, `length(a)`, `sin_deg(x)`, `cos_deg(x)`, `tan_deg(x)`, `linspace(start, end, n)`, `range(start, end, step)`
+#### Constants
+Mathematical constants with full precision:
+- `PI` - π (3.14159...)
+- `TAU` - τ (2π, 6.28318...)
+- `E` - e (2.71828...)
+
+#### Scalar Operations
+Basic scalar transformations:
+- `abs(x)` - absolute value
+- `sign(x)` - sign function (-1, 0, or 1)
+- `floor(x)` - largest integer ≤ x
+- `ceil(x)` - smallest integer ≥ x
+- `round(x)` - nearest integer
+- `trunc(x)` - truncate toward zero
+- `frac(x)` - fractional part
+
+#### Powers and Roots
+Exponentiation and root functions:
+- `sqrt(x)` - square root (√x)
+- `cbrt(x)` - cube root (∛x)
+- `pow(x, y)` - x raised to power y (x^y)
+- `pow_int(x, n)` - x raised to integer power n (optimized)
+
+#### Trigonometry (Radians)
+Standard trigonometric functions:
+- `sin(x)` - sine
+- `cos(x)` - cosine
+- `tan(x)` - tangent
+- `asin(x)` - arcsine (inverse sine)
+- `acos(x)` - arccosine (inverse cosine)
+- `atan(x)` - arctangent (inverse tangent)
+- `atan2(y, x)` - arctangent of y/x (handles quadrants)
+
+#### Trigonometry (Degrees)
+Degree-based variants for convenience:
+- `sin_deg(x)` - sine of x degrees
+- `cos_deg(x)` - cosine of x degrees
+- `tan_deg(x)` - tangent of x degrees
+
+#### Exponentials and Logarithms
+Natural and base-specific logarithms:
+- `exp(x)` - e raised to power x
+- `ln(x)` - natural logarithm (base e)
+- `log10(x)` - base-10 logarithm
+- `log2(x)` - base-2 logarithm
+
+#### Comparison and Clamping
+Value comparison and range operations:
+- `min(a, b)` - smaller of two values
+- `max(a, b)` - larger of two values
+- `clamp(x, lo, hi)` - constrain x to [lo, hi] range
+- `nearly_equal(a, b, eps)` - approximate equality within epsilon
+
+#### Division and Modulo
+Integer division and remainder operations:
+- `mod(a, b)` - remainder of a ÷ b
+- `div(a, b)` - integer division (a ÷ b)
+- `divmod(a, b)` - returns (quotient, remainder) as a box
+
+#### Geometric Functions
+Distance and angle calculations:
+- `hypot(x, y)` - hypotenuse of right triangle (√(x² + y²))
+- `length(a)` - magnitude of vector a (box of numbers)
+
+#### Angle Conversion
+Radian-degree conversions:
+- `deg(x)` - convert radians to degrees
+- `rad(x)` - convert degrees to radians
+
+#### Aggregation Functions
+Operations on collections of numbers:
+- `sum(xs)` - sum of all values in box xs
+- `mean(xs)` - arithmetic mean of values in box xs
+- `dot(a, b)` - dot product of vectors a and b (boxes of numbers)
+
+#### Sequence Generation
+Create sequences of numbers:
+- `linspace(start, end, n)` - n evenly spaced values from start to end
+- `range(start, end, step)` - arithmetic sequence from start to end with step
 
 Examples:
 
 ```scraps
-print sqrt(9)        # 3
-print sin(PI/2)     # ~1
-print pow(2, 10)    # 1024
-print clamp(5, 0, 3)# 3
-print hypot(3, 4)   # 5
+# Constants
+print PI                    # 3.14159...
+print TAU                   # 6.28318...
+
+# Basic operations
+print abs(-5)              # 5
+print sign(-3.14)          # -1
+print floor(3.7)           # 3
+print ceil(3.2)            # 4
+print round(3.5)           # 4
+print frac(3.7)            # 0.7
+
+# Powers and roots
+print sqrt(16)             # 4
+print cbrt(27)             # 3
+print pow(2, 8)            # 256
+print pow_int(2, 10)       # 1024
+
+# Trigonometry
+print sin(PI/2)            # ~1
+print cos(PI)              # -1
+print atan2(1, 1)          # ~0.785 (π/4)
+print sin_deg(90)          # 1
+print cos_deg(180)         # -1
+
+# Logarithms
+print ln(E)                # 1
+print log10(100)           # 2
+print log2(8)              # 3
+
+# Comparison and clamping
+print min(5, 3)            # 3
+print max(-1, 7)           # 7
+print clamp(10, 0, 5)      # 5
+print nearly_equal(3.14, PI, 0.01)  # TRUE
+
+# Division and modulo
+print mod(17, 5)           # 2
+print div(17, 5)           # 3
+print divmod(17, 5)        # [3, 2]
+
+# Geometric
+print hypot(3, 4)          # 5
+print length([3, 4])       # 5
+
+# Angle conversion
+print deg(PI)              # 180
+print rad(90)              # 1.5708...
+
+# Aggregation
+numbers = box()
+pack(1, 2, 3, 4, 5) -> numbers
+print sum(numbers)         # 15
+print mean(numbers)        # 3
+print dot([1, 2], [3, 4])  # 11
+
+# Sequences
+print linspace(0, 1, 5)    # [0, 0.25, 0.5, 0.75, 1]
+print range(0, 10, 2)      # [0, 2, 4, 6, 8]
 ```
 
 ## Control Flow
