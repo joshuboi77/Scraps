@@ -163,6 +163,7 @@ impl Compiler {
                 // Compile the function body into bytecode
                 let mut body_compiler = Compiler::new();
                 body_compiler.compile_block(body);
+                body_compiler.patch_jumps(); // CRITICAL: Patch jumps for function body
                 let function_body = body_compiler.program;
                 
                 // Use the new MakeFuncWithBody OpCode to store the compiled function body
@@ -178,6 +179,7 @@ impl Compiler {
                 // Compile rewire block into a function body; store as a function with a rewire target
                 let mut body_compiler = Compiler::new();
                 body_compiler.compile_block(body);
+                body_compiler.patch_jumps(); // CRITICAL: Patch jumps for rewire body
                 let function_body = body_compiler.program;
                 self.program.push(OpCode::MakeFuncWithBody {
                     name: destination.clone(),

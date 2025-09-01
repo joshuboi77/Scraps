@@ -699,6 +699,55 @@ fn execute_function(
                 local_env.insert(name.clone(), val);
             }
             
+            OpCode::Print => {
+                if let Some(val) = local_stack.pop() {
+                    let out_val = match val {
+                        Value::Str(s) => {
+                            // If rewired symbol, print its bound value
+                            if is_rewired(&local_env, &s) {
+                                local_env.get(&s).cloned().unwrap_or(Value::Str(s))
+                            } else {
+                                // Evaluate string as code (best-effort)
+                                match eval_snippet(local_env, &s) {
+                                    Ok(v) => v,
+                                    Err(_) => Value::Str(s), // fallback to literal
+                                }
+                            }
+                        }
+                        other => other,
+                    };
+                    println!("{}", out_val.format_for_display());
+                }
+            }
+            
+            // Control flow operations
+            OpCode::Jump(offset) => {
+                ip = *offset;
+                continue; // Skip the normal increment
+            }
+            
+            OpCode::JumpIfNot(offset) => {
+                let condition = local_stack.pop().expect("Expected condition for JumpIfNot");
+                match condition {
+                    Value::Bool(false) => {
+                        ip = *offset;
+                        continue; // Skip the normal increment
+                    }
+                    Value::Bool(true) => {
+                        // Continue to next instruction
+                    }
+                    _ => return Err("JumpIfNot condition must be boolean".to_string()),
+                }
+            }
+            
+            OpCode::Label(_) => {
+                // Labels are no-ops during execution
+            }
+            
+            OpCode::MakeBox => {
+                local_stack.push(Value::Box(vec![]));
+            }
+            
             // Arithmetic operations
             OpCode::Add => {
                 let b = local_stack.pop().expect("Expected second operand");

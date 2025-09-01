@@ -1,10 +1,10 @@
 # Scraps Language Manual
 
-A concise, complete reference to the Scraps language as implemented in this VM.
+A concise, accurate reference to the Scraps language as implemented in this VM.
 
-- Paradigm: expression-first, newline-terminated statements, arrow verbs for data movement.
+- Paradigm: expression‑first with newline‑terminated statements; control flow is statement‑based.
 - Values: `Int`, `Float`, `Bool`, `Str` (Unicode), `Box` (list), `Function`, `None`.
-- Purity: user function calls are pure by default (no env mutation). Use `rewire` + `result(...)` for intentional side effects.
+- Purity: user function calls are pure by default (no caller env mutation). Use `rewire` + `result(...)` for intentional side effects.
 - Identifiers: Unicode supported.
 
 ## Table of Contents
@@ -20,8 +20,8 @@ A concise, complete reference to the Scraps language as implemented in this VM.
   - [COUNT](#count)
   - [FISSION](#fission)
   - [FUSION](#fusion)
-- [READ / WRITE](#read--write)
-  - [Math Built-ins](#math-built-ins)
+- [I/O](#io)
+- [Math Built-ins](#math-built-ins)
 - [Control Flow](#control-flow)
   - [IF / ELSE](#if--else)
   - [WHILE](#while)
@@ -45,10 +45,11 @@ A concise, complete reference to the Scraps language as implemented in this VM.
 - Statements end at newline; blank lines allowed.
 - Comments start with `#`.
 - Grouping with `(` `)` for expressions and `{` `}` for blocks.
+- Control flow keywords (`IF`, `WHILE`) are statements, not expressions.
 - Arrows:
-  - Read-from: `<-` (read from right-hand value)
-  - Write-to: `->` (write to right-hand value)
-- Case-insensitive keywords for verbs and control flow (e.g., `PACK` or `pack`).
+  - Read‑from: `<-` (read from right‑hand value)
+  - Write‑to: `->` (write to right‑hand value)
+- Keywords are case‑insensitive (e.g., `PACK` or `pack`).
 
 ## Literals and Types
 
@@ -87,7 +88,7 @@ place(1: 9, 3: 7) -> x  # x = [1, 9, 3, 7] (index 3 created)
 ```
 
 ### UNPACK
-Extract an element or slice (end-exclusive) from a box or string.
+Extract an element or slice (end‑exclusive) from a box or string.
 
 ```scraps
 print unpack(0) <- x        # element at 0
@@ -95,7 +96,7 @@ print unpack(1, 3) <- x     # slice [1..3), e.g. [2, 3]
 ```
 
 ### PICK
-Multi-select within one layer (box or string). For strings, returns concatenated characters.
+Multi‑select within one layer (box or string). For strings, returns concatenated characters.
 
 ```scraps
 print pick(0, 2) <- x       # [x[0], x[2]]
@@ -133,7 +134,8 @@ print fusion("-") -> parts  # Hello-World
 print fusion("") -> chars   # hi!
 ```
 
-### READ / WRITE
+## I/O
+
 File I/O with strings.
 
 ```scraps
@@ -142,152 +144,57 @@ content = READ <- "tmp.txt"
 print content                 # Hello
 ```
 
-### Math Built-ins
+## Math Built-ins
 
-The Scraps VM provides comprehensive mathematical functions as built-in operations. All trigonometric functions use radians by default, with degree variants available.
+The VM provides comprehensive mathematical functions. Trig functions use radians by default; degree variants are available.
 
-#### Constants
-Mathematical constants with full precision:
-- `PI` - π (3.14159...)
-- `TAU` - τ (2π, 6.28318...)
-- `E` - e (2.71828...)
+Constants:
+- `PI` (π), `TAU` (2π), `E` (e)
 
-#### Scalar Operations
-Basic scalar transformations:
-- `abs(x)` - absolute value
-- `sign(x)` - sign function (-1, 0, or 1)
-- `floor(x)` - largest integer ≤ x
-- `ceil(x)` - smallest integer ≥ x
-- `round(x)` - nearest integer
-- `trunc(x)` - truncate toward zero
-- `frac(x)` - fractional part
+Scalars:
+- `abs, sign, floor, ceil, round, trunc, frac`
 
-#### Powers and Roots
-Exponentiation and root functions:
-- `sqrt(x)` - square root (√x)
-- `cbrt(x)` - cube root (∛x)
-- `pow(x, y)` - x raised to power y (x^y)
-- `pow_int(x, n)` - x raised to integer power n (optimized)
+Powers/roots:
+- `sqrt, cbrt, pow, pow_int`
 
-#### Trigonometry (Radians)
-Standard trigonometric functions:
-- `sin(x)` - sine
-- `cos(x)` - cosine
-- `tan(x)` - tangent
-- `asin(x)` - arcsine (inverse sine)
-- `acos(x)` - arccosine (inverse cosine)
-- `atan(x)` - arctangent (inverse tangent)
-- `atan2(y, x)` - arctangent of y/x (handles quadrants)
+Trig (rad):
+- `sin, cos, tan, asin, acos, atan, atan2`
 
-#### Trigonometry (Degrees)
-Degree-based variants for convenience:
-- `sin_deg(x)` - sine of x degrees
-- `cos_deg(x)` - cosine of x degrees
-- `tan_deg(x)` - tangent of x degrees
+Trig (deg):
+- `sin_deg, cos_deg, tan_deg`
 
-#### Exponentials and Logarithms
-Natural and base-specific logarithms:
-- `exp(x)` - e raised to power x
-- `ln(x)` - natural logarithm (base e)
-- `log10(x)` - base-10 logarithm
-- `log2(x)` - base-2 logarithm
+Exponentials/logs:
+- `exp, ln, log10, log2`
 
-#### Comparison and Clamping
-Value comparison and range operations:
-- `min(a, b)` - smaller of two values
-- `max(a, b)` - larger of two values
-- `clamp(x, lo, hi)` - constrain x to [lo, hi] range
-- `nearly_equal(a, b, eps)` - approximate equality within epsilon
+Compare/clamp:
+- `min, max, clamp, nearly_equal`
 
-#### Division and Modulo
-Integer division and remainder operations:
-- `mod(a, b)` - remainder of a ÷ b
-- `div(a, b)` - integer division (a ÷ b)
-- `divmod(a, b)` - returns (quotient, remainder) as a box
+Division/modulo:
+- `mod, div, divmod`
 
-#### Geometric Functions
-Distance and angle calculations:
-- `hypot(x, y)` - hypotenuse of right triangle (√(x² + y²))
-- `length(a)` - magnitude of vector a (box of numbers)
+Geometry:
+- `hypot, length` (Euclidean norm for numeric boxes)
 
-#### Angle Conversion
-Radian-degree conversions:
-- `deg(x)` - convert radians to degrees
-- `rad(x)` - convert degrees to radians
+Angle conversion:
+- `deg, rad`
 
-#### Aggregation Functions
-Operations on collections of numbers:
-- `sum(xs)` - sum of all values in box xs
-- `mean(xs)` - arithmetic mean of values in box xs
-- `dot(a, b)` - dot product of vectors a and b (boxes of numbers)
+Aggregation:
+- `sum, mean, dot`
 
-#### Sequence Generation
-Create sequences of numbers:
-- `linspace(start, end, n)` - n evenly spaced values from start to end
-- `range(start, end, step)` - arithmetic sequence from start to end with step
+Sequences:
+- `linspace(start, end, n)`, `range(start, end, step)`
 
 Examples:
 
 ```scraps
-# Constants
-print PI                    # 3.14159...
-print TAU                   # 6.28318...
-
-# Basic operations
+print PI                   # 3.14159...
 print abs(-5)              # 5
-print sign(-3.14)          # -1
-print floor(3.7)           # 3
-print ceil(3.2)            # 4
-print round(3.5)           # 4
-print frac(3.7)            # 0.7
-
-# Powers and roots
 print sqrt(16)             # 4
-print cbrt(27)             # 3
-print pow(2, 8)            # 256
-print pow_int(2, 10)       # 1024
-
-# Trigonometry
 print sin(PI/2)            # ~1
-print cos(PI)              # -1
-print atan2(1, 1)          # ~0.785 (π/4)
-print sin_deg(90)          # 1
-print cos_deg(180)         # -1
-
-# Logarithms
 print ln(E)                # 1
-print log10(100)           # 2
-print log2(8)              # 3
-
-# Comparison and clamping
-print min(5, 3)            # 3
-print max(-1, 7)           # 7
-print clamp(10, 0, 5)      # 5
-print nearly_equal(3.14, PI, 0.01)  # TRUE
-
-# Division and modulo
-print mod(17, 5)           # 2
-print div(17, 5)           # 3
 print divmod(17, 5)        # [3, 2]
-
-# Geometric
-print hypot(3, 4)          # 5
 print length([3, 4])       # 5
-
-# Angle conversion
-print deg(PI)              # 180
-print rad(90)              # 1.5708...
-
-# Aggregation
-numbers = box()
-pack(1, 2, 3, 4, 5) -> numbers
-print sum(numbers)         # 15
-print mean(numbers)        # 3
-print dot([1, 2], [3, 4])  # 11
-
-# Sequences
 print linspace(0, 1, 5)    # [0, 0.25, 0.5, 0.75, 1]
-print range(0, 10, 2)      # [0, 2, 4, 6, 8]
 ```
 
 ## Control Flow
@@ -295,8 +202,16 @@ print range(0, 10, 2)      # [0, 2, 4, 6, 8]
 ### IF / ELSE
 
 ```scraps
-print IF (1 < 2) { 42 } ELSE { 0 }    # 42
+IF (1 < 2) {
+  print 42
+} ELSE {
+  print 0
+}
 ```
+
+Notes:
+- IF/ELSE are statements; they do not yield a value. Use prints or assignments within branches.
+- Conditions must evaluate to `Bool`.
 
 ### WHILE
 
@@ -311,7 +226,7 @@ print x    # [0, 1, 2]
 ```
 
 ### TEST
-Prints `TRUE` or `FALSE` for boolean expression results.
+Prints a boolean expression’s result (`TRUE` or `FALSE`).
 
 ```scraps
 test (1 < 2)   # TRUE
@@ -352,8 +267,7 @@ print result(f)    # 42
 print x            # [42]
 ```
 
-- Semantics: the block runs with a mutable copy of `x`; after execution, the updated `x` is copied back to the caller’s env.
-- Nested rewires are supported and memory-safe; updates are copied back in the order of `result(...)` calls.
+Semantics: the block runs with a mutable copy of `x`; after execution, the updated `x` is copied back to the caller’s env.
 
 ### Dynamic Symbol Binding (string)
 Register a string literal as a live variable name.
@@ -364,7 +278,7 @@ rewire "greet"
 print "greet"   # Hello (resolves symbol)
 ```
 
-- After rewiring, using the same string literal on the left-hand side assigns to that variable; in print contexts, the rewired symbol resolves to the variable’s value.
+After rewiring, using the same string literal on the left‑hand side assigns to that variable; in print contexts, the rewired symbol resolves to the variable’s value.
 
 ## String as Code
 
@@ -381,6 +295,49 @@ rewire "msg"
 print "msg"       # Hi (resolves symbol, not evaluated)
 ```
 
+## Modules
+
+Ship a set of definitions as a module, then import them later.
+
+- `ship("Name")`: snapshots the current environment (excluding built‑ins) under module Name.
+- `ship(factory_fn)`: executes a zero‑arg function to build a module; exports are any new or changed definitions from its body; the module name is the function’s name.
+- `import(name1, name2, ...) <- src`: loads from a source and injects only selected exports into the current environment; if exactly one selector is given and it matches/aliases the module name, imports the whole module under that name.
+- `import("Name")`: import all exports from a previously shipped module in the current environment.
+- `source("file.scraps")`: evaluate a file directly and return its last value (useful for ad‑hoc loading).
+
+Import source resolution order for `src`:
+1) `clanker.toml`: searched upward from CWD, or overridden by `IGNITE`. Resolves `src` as a key in `[modules]`. If `[paths] sources = "dir"` exists, paths are resolved relative to that directory.
+2) `Scraps.toml`: fallback manifest; resolves keys similarly.
+3) File path: if no manifest key matches, `src` is treated as a filesystem path and loaded.
+
+Examples:
+
+```scraps
+# Function‑based module
+fn(use()) {
+  fn(use(x)) { x * 2 } -> double
+  PI = 3.14159
+} -> create_math_module
+ship(create_math_module)
+import(create_math_module)
+print double(10)   # 20
+
+# Snapshot current env as a module
+fn(use(x)) { x + 10 } -> add10
+ANSWER = 42
+ship("Utils")
+ANSWER = 0
+import("Utils")
+print ANSWER       # 42
+
+# Selective import from a manifest key or file
+import(double) <- create_math_module
+print double(7)    # 14
+
+# Source a file directly (no manifest)
+print source("lib/math.scraps")
+```
+
 ## Semantics & Errors
 
 - PICK: indices must be integers and within bounds; target must be box or string.
@@ -388,7 +345,9 @@ print "msg"       # Hi (resolves symbol, not evaluated)
 - FUSION: second argument must be a box of strings; all elements must be strings.
 - READ/WRITE: filename must be a string; WRITE content must be a string.
 - COUNT: accepts box, string, or function.
+- Control flow: `IF` and `WHILE` are statements (not expressions).
 - Purity: only `rewire` + `result` can mutate the caller’s environment.
+- PLACE: indices must be integers; resizing fills with `None`.
 
 ## Complete Examples
 
@@ -462,36 +421,9 @@ print fusion("") -> s2           # Hello World
 - Rewire variable: `rewire var { ... } -> dest`
 - Rewire symbol: `rewire "name"`; then `"name" = expr`, `print "name"`
 - String as code: `print "1 + 2"`
+- Modules: `ship("Name")`, `ship(factory)`, `import(name,...) <- src`, `import("Name")`, `source("file")`
 
 ---
 
-This manual documents all features supported by the VM, with examples and semantics to guide correct usage.
+This manual documents features supported by the VM, with examples and semantics to guide correct usage. (Note: a `rename` helper is intentionally omitted here.)
 
-## Modules
-
-Ship a set of definitions as a module, then import them later.
-
-- ship("Name"): snapshots the current environment (excluding built‑ins) under module Name.
-- ship(factory_fn): executes a zero‑arg function to build a module; exports are any new or changed definitions from its body; the module name is the function’s name.
-- import("Name" | factory_fn): loads the module and injects its exports into the current environment (overwrites existing bindings).
-
-Examples:
-
-```scraps
-# Function‑based module
-fn(use()) {
-  fn(use(x)) { x * 2 } -> double
-  PI = 3.14159
-} -> create_math_module
-ship(create_math_module)
-import(create_math_module)
-print double(10)   # 20
-
-# Snapshot current env as a module
-fn(use(x)) { x + 10 } -> add10
-ANSWER = 42
-ship("Utils")
-ANSWER = 0
-import("Utils")
-print ANSWER       # 42
-```
