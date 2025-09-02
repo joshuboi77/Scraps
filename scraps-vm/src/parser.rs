@@ -63,9 +63,12 @@ pub enum Expr {
         indices: Vec<Expr>,
     },
     
-
-    
-
+    // Control flow expressions
+    If {
+        condition: Box<Expr>,
+        then_block: Block,
+        else_block: Block,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -455,7 +458,7 @@ impl Parser {
             TokenKind::Identifier => {
                 let name = token.lexeme.clone();
                 
-                // Check for boolean literals
+                // Check for boolean literals and control flow expressions
                 match name.as_str() {
                     "TRUE" => {
                         self.advance();
@@ -468,6 +471,23 @@ impl Parser {
                     "string" => {
                         self.advance();
                         Ok(Expr::String("".to_string()))
+                    }
+                    "if" | "IF" => {
+                        self.advance(); // consume if
+                        let condition = self.expression()?;
+                        let then_block = self.block()?;
+                        
+                        // Expect ELSE
+                        if !self.match_keyword("ELSE") && !self.match_keyword("else") {
+                            return Err("Expected 'ELSE' after if block in expression".to_string());
+                        }
+                        
+                        let else_block = self.block()?;
+                        Ok(Expr::If {
+                            condition: Box::new(condition),
+                            then_block,
+                            else_block,
+                        })
                     }
                     _ => {
                         self.advance();

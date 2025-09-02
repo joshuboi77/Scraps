@@ -397,6 +397,7 @@ impl Lexer {
         
         let mut value = String::new();
         let mut lexeme = String::from("\"");
+        let mut found_closing_quote = false;
         
         while self.position < self.source.len() {
             let ch = self.peek_char(0)?;
@@ -404,6 +405,7 @@ impl Lexer {
             if ch == '"' {
                 lexeme.push(ch);
                 self.advance()?;
+                found_closing_quote = true;
                 break;
             }
             
@@ -429,7 +431,7 @@ impl Lexer {
             self.advance()?;
         }
         
-        if self.position >= self.source.len() {
+        if !found_closing_quote {
             return Err(format!("Unterminated string at line {}:{}", start_line, start_column));
         }
         
@@ -523,16 +525,31 @@ impl Lexer {
     }
     
     fn peek_char(&self, offset: usize) -> Result<char, String> {
-        let pos = self.position + offset;
-        if pos >= self.source.len() {
+        let byte_pos = self.position + offset;
+        if byte_pos >= self.source.len() {
             return Err("Unexpected end of input".to_string());
         }
-        Ok(self.source.chars().nth(pos).unwrap())
+        
+        // Convert byte position to character position
+        let chars: Vec<char> = self.source.chars().collect();
+        let mut current_byte_pos = 0;
+        
+        for (_char_idx, ch) in chars.iter().enumerate() {
+            if current_byte_pos == byte_pos {
+                return Ok(*ch);
+            }
+            current_byte_pos += ch.len_utf8();
+            if current_byte_pos > byte_pos {
+                return Err("Invalid byte position in UTF-8 string".to_string());
+            }
+        }
+        
+        Err("Position beyond end of string".to_string())
     }
     
     fn advance(&mut self) -> Result<char, String> {
         let ch = self.peek_char(0)?;
-        self.position += 1;
+        self.position += ch.len_utf8(); // Advance by actual byte length of character
         if ch != '\n' {
             self.column += 1;
         }

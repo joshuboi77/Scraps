@@ -374,12 +374,49 @@ impl Compiler {
                 self.program.push(OpCode::Pick(num_indices));
             }
             
-
+            Expr::If { condition, then_block, else_block } => {
+                // Compile condition
+                self.compile_expression(*condition);
+                
+                // Create jump labels
+                let else_label = self.create_label();
+                let end_label = self.create_label();
+                
+                // Jump to else block if condition is false (placeholder target)
+                let jump_if_not_index = self.program.len();
+                self.program.push(OpCode::JumpIfNot(0)); // placeholder
+                self.jump_patches.push((jump_if_not_index, else_label.clone()));
+                
+                // Compile then block directly (no separate compiler)
+                self.compile_block(then_block);
+                
+                // Jump to end (skip else block) (placeholder target)
+                let jump_index = self.program.len();
+                self.program.push(OpCode::Jump(0)); // placeholder
+                self.jump_patches.push((jump_index, end_label.clone()));
+                
+                // Else block
+                self.set_label(else_label);
+                self.compile_block(else_block);
+                
+                // End label
+                self.set_label(end_label);
+            }
             
 
         }
     }
 
+    fn create_label(&mut self) -> String {
+        let label = format!("label_{}", self.label_counter);
+        self.label_counter += 1;
+        label
+    }
+    
+    fn set_label(&mut self, label: String) {
+        self.program.push(OpCode::Label(label));
+    }
+    
     fn patch_jumps(&mut self) {
         // Build label map from current program
         let mut label_map = HashMap::new();
