@@ -58,4 +58,12 @@ pub enum OpCode {
     // I/O and utilities
     Print,
     Halt,
+    
+    // Network I/O - TCP Sockets
+    TcpConnect(String, u16),    // host, port -> connection_id
+    TcpSend(usize),             // connection_id, data -> success
+    TcpReceive(usize),          // connection_id, max_bytes -> data
+    TcpClose(usize),            // connection_id -> success
+    TcpListen(u16),             // port -> listener_id
+    TcpAccept(usize),           // listener_id -> connection_id
 }

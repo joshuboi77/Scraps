@@ -21,6 +21,7 @@ A concise, accurate reference to the Scraps language as implemented in this VM.
   - [FISSION](#fission)
   - [FUSION](#fusion)
 - [I/O](#io)
+- [Network I/O (TCP)](#network-io-tcp)
 - [Math Built-ins](#math-built-ins)
 - [Control Flow](#control-flow)
   - [IF / ELSE](#if--else)
@@ -142,6 +143,80 @@ File I/O with strings.
 WRITE("Hello") -> "tmp.txt"
 content = READ <- "tmp.txt"
 print content                 # Hello
+```
+
+## Network I/O (TCP)
+
+Synchronous TCP sockets exposed as built-in functions. Works at top level and inside functions.
+
+- `tcp_listen(port) -> listener`: Bind to `127.0.0.1:port` and return a listener handle.
+- `tcp_accept(listener) -> connection`: Accept a single inbound connection and return a connection handle.
+- `tcp_connect(host, port) -> connection`: Connect to a TCP server and return a connection handle.
+- `tcp_send(connection, data) -> TRUE`: Send a string payload over a connection.
+- `tcp_receive(connection, max_bytes) -> string`: Read up to `max_bytes` and return a string (UTF‑8).
+- `tcp_close(connection_or_listener) -> TRUE`: Close a connection or a listener.
+
+Notes:
+- Blocking behavior: `tcp_accept` blocks until a client connects. For single-script demos, connect first, then accept.
+- Timeouts: Connections have short read/write timeouts; `tcp_receive` returns an empty string on timeout.
+- Encoding: `tcp_receive` expects UTF‑8. Invalid UTF‑8 returns an error.
+- Scope: Built-ins (not opcodes). They compose like normal function calls and can be used inside `fn{}` bodies.
+
+Examples
+
+1) Local echo roundtrip (single script)
+
+```scraps
+port = 9091
+tcp_listen(port) -> l
+tcp_connect("127.0.0.1", port) -> c_client
+tcp_accept(l) -> c_server
+
+tcp_send(c_client, "ping") -> _
+tcp_receive(c_server, 1024) -> srv_data
+print srv_data              # ping
+
+tcp_send(c_server, "pong") -> _
+tcp_receive(c_client, 1024) -> cli_data
+print cli_data              # pong
+
+tcp_close(c_client) -> _
+tcp_close(c_server) -> _
+tcp_close(l) -> _
+```
+
+2) Simple server loop (single connection)
+
+```scraps
+tcp_listen(9092) -> l
+print "waiting..."
+tcp_accept(l) -> c
+print "connected"
+
+i = 0
+WHILE (i < 3) {
+  tcp_receive(c, 1024) -> msg
+  print msg
+  tcp_send(c, fusion("") -> ["ok:", msg]) -> _
+  i = i + 1
+}
+
+tcp_close(c) -> _
+tcp_close(l) -> _
+```
+
+3) Client function usage
+
+```scraps
+fn(use(host, port)) {
+  tcp_connect(host, port) -> c
+  tcp_send(c, "hello") -> _
+  tcp_receive(c, 1024) -> reply
+  tcp_close(c) -> _
+  reply
+} -> ping_once
+
+print ping_once("127.0.0.1", 9092)
 ```
 
 ## Math Built-ins
@@ -412,6 +487,7 @@ print fusion("") -> s2           # Hello World
 - Count: `count(expr)` or `count(i[, j]) <- x`
 - Split/Join: `fission(d) <- s`, `fusion(d) -> xs`
 - I/O: `WRITE(content) -> "file"`, `READ <- "file"`
+- Network I/O: `tcp_listen(p)->l`, `tcp_accept(l)->c`, `tcp_connect(h,p)->c`, `tcp_send(c,s)`, `tcp_receive(c,n)`, `tcp_close(x)`
 - If/Else: `IF cond { ... } ELSE { ... }`
 - While: `WHILE cond { ... }`
 - Test: `test expr`
@@ -426,4 +502,3 @@ print fusion("") -> s2           # Hello World
 ---
 
 This manual documents features supported by the VM, with examples and semantics to guide correct usage. (Note: a `rename` helper is intentionally omitted here.)
-

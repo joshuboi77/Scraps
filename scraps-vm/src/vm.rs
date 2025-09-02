@@ -1,5 +1,3 @@
-
-
 use std::collections::HashMap;
 use crate::value::Value;
 use crate::bytecode::OpCode;
@@ -9,8 +7,16 @@ use crate::parser::Parser;
 use crate::compiler::Compiler;
 use std::fs;
 use std::path::{Path, PathBuf};
+use crate::tcp_socket_manager::TcpSocketManager;
+use std::sync::{Mutex, OnceLock};
 
 const REWIRED_KEY: &str = "__rewired__";
+
+static TCP_MANAGER_GLOBAL: OnceLock<Mutex<TcpSocketManager>> = OnceLock::new();
+
+fn tcp_manager_global() -> &'static Mutex<TcpSocketManager> {
+    TCP_MANAGER_GLOBAL.get_or_init(|| Mutex::new(TcpSocketManager::new()))
+}
 
 fn is_rewired(env: &HashMap<String, Value>, name: &str) -> bool {
     if let Some(Value::Box(list)) = env.get(REWIRED_KEY) {
@@ -339,7 +345,7 @@ fn execute_function(
             OpCode::Call(_func_name, arg_count) => {
                 let func_name_value = local_stack.pop().expect("Expected function name on stack");
                 let func_name = match func_name_value { Value::Str(s) => s, _ => return Err("Function name must be a string".to_string()) };
-                let func = local_env.get(&func_name).ok_or("Function not found")?;
+                let func = local_env.get(&func_name).cloned().ok_or("Function not found")?;
                 match func_name.as_str() {
                     "box" => { if *arg_count != 0 { return Err("BOX expects 0 arguments".to_string()); } local_stack.push(Value::Box(vec![])); }
                     "source" => {
@@ -433,45 +439,97 @@ fn execute_function(
                         }
                     }
                     "ship" => {
-                        if *arg_count != 1 { return Err("SHIP expects exactly 1 argument".to_string()); }
-                        let arg = local_stack.pop().expect("Expected argument for SHIP");
-                        let (module_name, module_exports): (String, HashMap<String, Value>) = match arg {
-                            Value::Str(s) => {
-                                let mut exports = HashMap::new();
-                                for (key, value) in local_env.iter() {
-                                    if !key.starts_with("__") &&
-                                       !["box","pack","place","unpack","pick","count","print",
-                                         "result","string","read","write","fission","fusion",
-                                         "rewire_symbol","ship","import","source"].contains(&key.as_str()) {
-                                        exports.insert(key.clone(), value.clone());
-                                    }
-                                }
-                                (s, exports)
-                            }
+                        if *arg_count != 0 { return Err("SHIP expects 0 arguments".to_string()); }
+                        // Get the function name from the environment
+                        let func_name = func_name.clone();
+                        let func = local_env.get(&func_name).cloned().ok_or("Function not found")?;
+                        match func {
                             Value::Function { name, params, body, .. } => {
                                 if !params.is_empty() { return Err("SHIP: function argument must take 0 parameters".to_string()); }
+                                // Execute the factory in a cloned environment to collect its definitions
                                 let mut module_env = local_env.clone();
                                 let mut tmp_stack: Vec<Value> = Vec::new();
                                 let _ = execute_function(&body, &mut tmp_stack, &mut module_env)?;
+                                // Diff module_env against env to get new/changed definitions
                                 let mut exports = HashMap::new();
                                 for (key, value) in module_env.iter() {
                                     if !key.starts_with("__") &&
                                        !["box","pack","place","unpack","pick","count","print",
                                          "result","string","read","write","fission","fusion",
-                                         "rewire_symbol","ship","import","source"].contains(&key.as_str()) {
-                                        match local_env.get(key) { Some(old) if old == value => {}, _ => { exports.insert(key.clone(), value.clone()); } }
+                                         "rewire_symbol","ship","import"].contains(&key.as_str()) {
+                                        match local_env.get(key) {
+                                            Some(old) if old == value => { /* unchanged; skip */ }
+                                            _ => { exports.insert(key.clone(), value.clone()); }
+                                        }
                                     }
                                 }
-                                (name, exports)
+                                // Convert exports to a boxed representation
+                                let mut pairs: Vec<Value> = Vec::new();
+                                for (k, v) in exports.iter() {
+                                    pairs.push(Value::Box(vec![Value::Str(k.clone()), v.clone()]));
+                                }
+                                let module_key = format!("__module_{}", name);
+                                local_env.insert(module_key, Value::Box(vec![
+                                    Value::Str(name.clone()),
+                                    Value::Box(pairs.clone()),
+                                ]));
+                                local_stack.push(Value::Str(format!("Module '{}' shipped with {} exports", name, exports.len())));
                             }
-                            _ => return Err("SHIP: module must be a string or function".to_string()),
-                        };
-
-                        let mut pairs: Vec<Value> = Vec::new();
-                        for (k, v) in module_exports.iter() { pairs.push(Value::Box(vec![Value::Str(k.clone()), v.clone()])); }
-                        let module_key = format!("__module_{}", module_name);
-                        local_env.insert(module_key, Value::Box(vec![ Value::Str(module_name.clone()), Value::Box(pairs) ]));
-                        local_stack.push(Value::Str(format!("Module '{}' shipped with {} exports", module_name, module_exports.len())));
+                            _ => return Err("SHIP: module must be a function".to_string()),
+                        }
+                    }
+                    
+                    // TCP Network I/O Functions
+                    "tcp_connect" => {
+                        if *arg_count != 2 { return Err("TCP_CONNECT expects exactly 2 arguments (host, port)".to_string()); }
+                        let port_val = local_stack.pop().expect("Expected port for TCP_CONNECT");
+                        let host_val = local_stack.pop().expect("Expected host for TCP_CONNECT");
+                        let host = match host_val { Value::Str(s) => s, _ => return Err("TCP_CONNECT host must be a string".to_string()) };
+                        let port: u16 = match port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("TCP_CONNECT port must be a number".to_string()) };
+                        let mut mgr = tcp_manager_global().lock().map_err(|_| "TCP manager poisoned".to_string())?;
+                        match mgr.connect(&host, port) { Ok(id) => local_stack.push(Value::TcpConnection(id)), Err(e) => return Err(e) }
+                    }
+                    "tcp_listen" => {
+                        if *arg_count != 1 { return Err("TCP_LISTEN expects exactly 1 argument (port)".to_string()); }
+                        let port_val = local_stack.pop().expect("Expected port for TCP_LISTEN");
+                        let port: u16 = match port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("TCP_LISTEN port must be a number".to_string()) };
+                        let mut mgr = tcp_manager_global().lock().map_err(|_| "TCP manager poisoned".to_string())?;
+                        match mgr.listen(port) { Ok(id) => local_stack.push(Value::TcpListener(id)), Err(e) => return Err(e) }
+                    }
+                    "tcp_send" => {
+                        if *arg_count != 2 { return Err("TCP_SEND expects exactly 2 arguments (connection, data)".to_string()); }
+                        let data_val = local_stack.pop().expect("Expected data for TCP_SEND");
+                        let conn_val = local_stack.pop().expect("Expected connection for TCP_SEND");
+                        let data = match data_val { Value::Str(s) => s, _ => return Err("TCP_SEND data must be a string".to_string()) };
+                        let id = match conn_val { Value::TcpConnection(id) => id, _ => return Err("TCP_SEND connection must be a TCP connection".to_string()) };
+                        let mut mgr = tcp_manager_global().lock().map_err(|_| "TCP manager poisoned".to_string())?;
+                        match mgr.send(id, &data) { Ok(_) => local_stack.push(Value::Bool(true)), Err(e) => return Err(e) }
+                    }
+                    "tcp_receive" => {
+                        if *arg_count != 2 { return Err("TCP_RECEIVE expects exactly 2 arguments (connection, max_bytes)".to_string()); }
+                        let max_bytes_val = local_stack.pop().expect("Expected max_bytes for TCP_RECEIVE");
+                        let conn_val = local_stack.pop().expect("Expected connection for TCP_RECEIVE");
+                        let max_bytes: usize = match max_bytes_val { Value::Int(n) => n as usize, Value::Float(f) => f as usize, _ => return Err("TCP_RECEIVE max_bytes must be a number".to_string()) };
+                        let id = match conn_val { Value::TcpConnection(id) => id, _ => return Err("TCP_RECEIVE connection must be a TCP connection".to_string()) };
+                        let mut mgr = tcp_manager_global().lock().map_err(|_| "TCP manager poisoned".to_string())?;
+                        match mgr.receive(id, max_bytes) { Ok(s) => local_stack.push(Value::Str(s)), Err(e) => return Err(e) }
+                    }
+                    "tcp_close" => {
+                        if *arg_count != 1 { return Err("TCP_CLOSE expects exactly 1 argument (connection or listener)".to_string()); }
+                        let val = local_stack.pop().expect("Expected argument for TCP_CLOSE");
+                        let mut mgr = tcp_manager_global().lock().map_err(|_| "TCP manager poisoned".to_string())?;
+                        match val {
+                            Value::TcpConnection(id) => match mgr.close_connection(id) { Ok(_) => local_stack.push(Value::Bool(true)), Err(e) => return Err(e) },
+                            Value::TcpListener(id) => match mgr.close_listener(id) { Ok(_) => local_stack.push(Value::Bool(true)), Err(e) => return Err(e) },
+                            _ => return Err("TCP_CLOSE expects TCP connection or listener".to_string()),
+                        }
+                    }
+                    "tcp_accept" => {
+                        if *arg_count != 1 { return Err("TCP_ACCEPT expects exactly 1 argument (listener)".to_string()); }
+                        let val = local_stack.pop().expect("Expected listener for TCP_ACCEPT");
+                        let id = match val { Value::TcpListener(id) => id, _ => return Err("TCP_ACCEPT listener must be a TCP listener".to_string()) };
+                        let mut mgr = tcp_manager_global().lock().map_err(|_| "TCP manager poisoned".to_string())?;
+                        match mgr.accept(id) { Ok(conn_id) => local_stack.push(Value::TcpConnection(conn_id)), Err(e) => return Err(e) }
                     }
                     "result" => {
                         if *arg_count != 1 { return Err("RESULT expects exactly 1 argument".to_string()); }
@@ -923,6 +981,7 @@ fn execute_function(
 pub fn run(program: &[OpCode]) -> Result<(), String> {
     let mut stack: Vec<Value> = Vec::new();
     let mut env: HashMap<String, Value> = HashMap::new();
+    let mut tcp_manager = TcpSocketManager::new();
     
     // Initialize built-in functions
     env.insert("box".to_string(), Value::Function {
@@ -1048,6 +1107,44 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
     // Add import function
     env.insert("import".to_string(), Value::Function {
         name: "import".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    
+    // TCP Network I/O Functions
+    env.insert("tcp_connect".to_string(), Value::Function {
+        name: "tcp_connect".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("tcp_listen".to_string(), Value::Function {
+        name: "tcp_listen".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("tcp_send".to_string(), Value::Function {
+        name: "tcp_send".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("tcp_receive".to_string(), Value::Function {
+        name: "tcp_receive".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("tcp_close".to_string(), Value::Function {
+        name: "tcp_close".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("tcp_accept".to_string(), Value::Function {
+        name: "tcp_accept".to_string(),
         params: vec![],
         body: vec![],
         rewire_target: None,
@@ -1484,7 +1581,7 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                 };
                 
                 // Get the function from the environment
-                let func = env.get(&func_name).expect("Function not found");
+                let func = env.get(&func_name).cloned().expect("Function not found");
                 
                 // Handle built-in functions
                 match func_name.as_str() {
@@ -1528,6 +1625,58 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                             Ok(_) => stack.push(Value::Str(data)),
                             Err(e) => return Err(format!("WRITE error: {}", e)),
                         }
+                    }
+                    // TCP Network I/O built-ins (top-level)
+                    "tcp_connect" => {
+                        if *arg_count != 2 { return Err("TCP_CONNECT expects exactly 2 arguments (host, port)".to_string()); }
+                        let port_val = stack.pop().expect("Expected port for TCP_CONNECT");
+                        let host_val = stack.pop().expect("Expected host for TCP_CONNECT");
+                        let host = match host_val { Value::Str(s) => s, _ => return Err("TCP_CONNECT host must be a string".to_string()) };
+                        let port: u16 = match port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("TCP_CONNECT port must be a number".to_string()) };
+                        let mut mgr = tcp_manager_global().lock().map_err(|_| "TCP manager poisoned".to_string())?;
+                        match mgr.connect(&host, port) { Ok(id) => stack.push(Value::TcpConnection(id)), Err(e) => return Err(e) }
+                    }
+                    "tcp_listen" => {
+                        if *arg_count != 1 { return Err("TCP_LISTEN expects exactly 1 argument (port)".to_string()); }
+                        let port_val = stack.pop().expect("Expected port for TCP_LISTEN");
+                        let port: u16 = match port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("TCP_LISTEN port must be a number".to_string()) };
+                        let mut mgr = tcp_manager_global().lock().map_err(|_| "TCP manager poisoned".to_string())?;
+                        match mgr.listen(port) { Ok(id) => stack.push(Value::TcpListener(id)), Err(e) => return Err(e) }
+                    }
+                    "tcp_send" => {
+                        if *arg_count != 2 { return Err("TCP_SEND expects exactly 2 arguments (connection, data)".to_string()); }
+                        let data_val = stack.pop().expect("Expected data for TCP_SEND");
+                        let conn_val = stack.pop().expect("Expected connection for TCP_SEND");
+                        let data = match data_val { Value::Str(s) => s, _ => return Err("TCP_SEND data must be a string".to_string()) };
+                        let id = match conn_val { Value::TcpConnection(id) => id, _ => return Err("TCP_SEND expects TCP connection".to_string()) };
+                        let mut mgr = tcp_manager_global().lock().map_err(|_| "TCP manager poisoned".to_string())?;
+                        match mgr.send(id, &data) { Ok(_) => stack.push(Value::Bool(true)), Err(e) => return Err(e) }
+                    }
+                    "tcp_receive" => {
+                        if *arg_count != 2 { return Err("TCP_RECEIVE expects exactly 2 arguments (connection, max_bytes)".to_string()); }
+                        let max_val = stack.pop().expect("Expected max_bytes for TCP_RECEIVE");
+                        let conn_val = stack.pop().expect("Expected connection for TCP_RECEIVE");
+                        let max_bytes: usize = match max_val { Value::Int(n) => n as usize, Value::Float(f) => f as usize, _ => return Err("TCP_RECEIVE max_bytes must be a number".to_string()) };
+                        let id = match conn_val { Value::TcpConnection(id) => id, _ => return Err("TCP_RECEIVE expects TCP connection".to_string()) };
+                        let mut mgr = tcp_manager_global().lock().map_err(|_| "TCP manager poisoned".to_string())?;
+                        match mgr.receive(id, max_bytes) { Ok(s) => stack.push(Value::Str(s)), Err(e) => return Err(e) }
+                    }
+                    "tcp_close" => {
+                        if *arg_count != 1 { return Err("TCP_CLOSE expects exactly 1 argument (connection or listener)".to_string()); }
+                        let val = stack.pop().expect("Expected argument for TCP_CLOSE");
+                        let mut mgr = tcp_manager_global().lock().map_err(|_| "TCP manager poisoned".to_string())?;
+                        match val {
+                            Value::TcpConnection(id) => match mgr.close_connection(id) { Ok(_) => stack.push(Value::Bool(true)), Err(e) => return Err(e) },
+                            Value::TcpListener(id) => match mgr.close_listener(id) { Ok(_) => stack.push(Value::Bool(true)), Err(e) => return Err(e) },
+                            _ => return Err("TCP_CLOSE expects TCP connection or listener".to_string()),
+                        }
+                    }
+                    "tcp_accept" => {
+                        if *arg_count != 1 { return Err("TCP_ACCEPT expects exactly 1 argument (listener)".to_string()); }
+                        let val = stack.pop().expect("Expected listener for TCP_ACCEPT");
+                        let id = match val { Value::TcpListener(id) => id, _ => return Err("TCP_ACCEPT expects TCP listener".to_string()) };
+                        let mut mgr = tcp_manager_global().lock().map_err(|_| "TCP manager poisoned".to_string())?;
+                        match mgr.accept(id) { Ok(conn_id) => stack.push(Value::TcpConnection(conn_id)), Err(e) => return Err(e) }
                     }
                     // Math built-ins (top-level)
                     "abs" => { if *arg_count != 1 { return Err("ABS expects 1 argument".to_string()); } let x = stack.pop().unwrap(); let v = match x { Value::Int(n) => (n as f64).abs(), Value::Float(f)=> f.abs(), _=> return Err("ABS: type".to_string())}; stack.push(Value::Float(v)); }
@@ -1698,27 +1847,13 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                         stack.push(Value::Str("OK".to_string()));
                     }
                     "ship" => {
-                        if *arg_count != 1 { return Err("SHIP expects exactly 1 argument".to_string()); }
-                        let arg = stack.pop().expect("Expected argument for SHIP");
-                        // Determine module name and how to collect exports
-                        let (module_name, module_exports): (String, HashMap<String, Value>) = match arg {
-                            Value::Str(s) => {
-                                // Ship current environment under the given name
-                                let mut exports = HashMap::new();
-                                for (key, value) in env.iter() {
-                                    if !key.starts_with("__") &&
-                                       !["box","pack","place","unpack","pick","count","print",
-                                         "result","string","read","write","fission","fusion",
-                                         "rewire_symbol","ship","import"].contains(&key.as_str()) {
-                                        exports.insert(key.clone(), value.clone());
-                                    }
-                                }
-                                (s, exports)
-                            }
+                        if *arg_count != 0 { return Err("SHIP expects 0 arguments".to_string()); }
+                        // Get the function name from the environment
+                        let func_name = func_name.clone();
+                        let func = env.get(&func_name).cloned().ok_or("Function not found")?;
+                        match func {
                             Value::Function { name, params, body, .. } => {
-                                if !params.is_empty() {
-                                    return Err("SHIP: function argument must take 0 parameters".to_string());
-                                }
+                                if !params.is_empty() { return Err("SHIP: function argument must take 0 parameters".to_string()); }
                                 // Execute the factory in a cloned environment to collect its definitions
                                 let mut module_env = env.clone();
                                 let mut tmp_stack: Vec<Value> = Vec::new();
@@ -1736,24 +1871,23 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                                         }
                                     }
                                 }
-                                (name, exports)
+                                // Convert exports to a boxed representation
+                                let mut pairs: Vec<Value> = Vec::new();
+                                for (k, v) in exports.iter() {
+                                    pairs.push(Value::Box(vec![Value::Str(k.clone()), v.clone()]));
+                                }
+                                let module_key = format!("__module_{}", name);
+                                env.insert(module_key, Value::Box(vec![
+                                    Value::Str(name.clone()),
+                                    Value::Box(pairs.clone()),
+                                ]));
+                                stack.push(Value::Str(format!("Module '{}' shipped with {} exports", name, exports.len())));
                             }
-                            _ => return Err("SHIP: module must be a string or function".to_string()),
-                        };
-
-                        // Convert exports to a boxed representation: [Str name, Box [ Box([Str key, value]), ... ]]
-                        let mut pairs: Vec<Value> = Vec::new();
-                        for (k, v) in module_exports.iter() {
-                            pairs.push(Value::Box(vec![Value::Str(k.clone()), v.clone()]));
+                            _ => return Err("SHIP: module must be a function".to_string()),
                         }
-                        let module_key = format!("__module_{}", module_name);
-                        env.insert(module_key, Value::Box(vec![
-                            Value::Str(module_name.clone()),
-                            Value::Box(pairs.clone()),
-                        ]));
-
-                        stack.push(Value::Str(format!("Module '{}' shipped with {} exports", module_name, module_exports.len())));
                     }
+                    
+
                     "import" => {
                         if *arg_count == 1 {
                             // import(arg): if arg matches a module record, import it; else treat as source key and import all from loaded modules
@@ -1764,8 +1898,7 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                                     let module_key = format!("__module_{}", name);
                                     let module_val = env.get(&module_key).ok_or_else(|| format!("IMPORT: module '{}' not found", name))?;
                                     let exports_box = match module_val { Value::Box(items) if items.len()>=2 => { match &items[1] { Value::Box(v)=> v.clone(), _=> Vec::new() } }, _=> Vec::new() };
-                                    let mut count = 0;
-                                    for pair in exports_box.into_iter() { if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); env.insert(key.clone(), val); count+=1; } } } }
+                                    let mut count = 0; for pair in exports_box.into_iter() { if let Value::Box(kv) = pair { if kv.len()==2 { if let Value::Str(key)=&kv[0] { let val = kv[1].clone(); env.insert(key.clone(), val); count+=1; } } } }
                                     stack.push(Value::Str(format!("Module '{}' imported with {} exports", name, count)));
                                 }
                                 Value::Str(s) => {
@@ -1939,6 +2072,91 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
             }
             
             OpCode::Halt => break,
+            
+            // TCP Socket Operations
+            OpCode::TcpConnect(host, port) => {
+                match tcp_manager.connect(host, *port) {
+                    Ok(connection_id) => stack.push(Value::TcpConnection(connection_id)),
+                    Err(e) => return Err(e),
+                }
+            }
+            
+            OpCode::TcpListen(port) => {
+                match tcp_manager.listen(*port) {
+                    Ok(listener_id) => stack.push(Value::TcpListener(listener_id)),
+                    Err(e) => return Err(e),
+                }
+            }
+            
+            OpCode::TcpSend(max_bytes) => {
+                let data = stack.pop().expect("Expected data to send");
+                let connection = stack.pop().expect("Expected connection");
+                
+                let data_str = match data {
+                    Value::Str(s) => s,
+                    _ => return Err("TCP_SEND expects string data".to_string()),
+                };
+                
+                let connection_id = match connection {
+                    Value::TcpConnection(id) => id,
+                    _ => return Err("TCP_SEND expects TCP connection".to_string()),
+                };
+                
+                match tcp_manager.send(connection_id, &data_str) {
+                    Ok(_) => stack.push(Value::Bool(true)),
+                    Err(e) => return Err(e),
+                }
+            }
+            
+            OpCode::TcpReceive(max_bytes) => {
+                let connection = stack.pop().expect("Expected connection");
+                
+                let connection_id = match connection {
+                    Value::TcpConnection(id) => id,
+                    _ => return Err("TCP_RECEIVE expects TCP connection".to_string()),
+                };
+                
+                match tcp_manager.receive(connection_id, *max_bytes) {
+                    Ok(data) => stack.push(Value::Str(data)),
+                    Err(e) => return Err(e),
+                }
+            }
+            
+            OpCode::TcpClose(connection_id) => {
+                let connection = stack.pop().expect("Expected connection");
+                
+                let id = match connection {
+                    Value::TcpConnection(id) => id,
+                    Value::TcpListener(id) => id,
+                    _ => return Err("TCP_CLOSE expects TCP connection or listener".to_string()),
+                };
+                
+                let result = if connection_id == &0 {
+                    // Close connection
+                    tcp_manager.close_connection(id)
+                } else {
+                    // Close listener
+                    tcp_manager.close_listener(id)
+                };
+                
+                match result {
+                    Ok(_) => stack.push(Value::Bool(true)),
+                    Err(e) => return Err(e),
+                }
+            }
+            
+            OpCode::TcpAccept(listener_id) => {
+                let listener = stack.pop().expect("Expected listener");
+                
+                let id = match listener {
+                    Value::TcpListener(id) => id,
+                    _ => return Err("TCP_ACCEPT expects TCP listener".to_string()),
+                };
+                
+                // For now, we'll return an error since accept is blocking
+                // In a real implementation, this would need to be non-blocking
+                return Err("TCP_ACCEPT not yet implemented (blocking operation)".to_string());
+            }
         }
         
         // Normal instruction progression

@@ -12,6 +12,8 @@ pub enum Value {
         rewire_target: Option<String>,
     },
     None,
+    TcpConnection(usize),
+    TcpListener(usize),
 }
 
 impl Value {
@@ -36,6 +38,8 @@ impl Value {
                 }
             }
             Value::None => "None".to_string(),
+            Value::TcpConnection(id) => format!("TcpConnection({})", id),
+            Value::TcpListener(id) => format!("TcpListener({})", id),
         }
     }
 }

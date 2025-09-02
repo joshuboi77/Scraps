@@ -4,6 +4,7 @@ mod value;
 mod compiler;
 mod lexer;
 mod parser;
+mod tcp_socket_manager;
 
 use compiler::Compiler;
 use lexer::Lexer;

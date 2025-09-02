@@ -299,6 +299,37 @@ impl Parser {
                         self.rename_statement()
                     }
                     
+                    // TCP Network I/O Keywords
+                    "tcp_connect" | "TCP_CONNECT" => {
+                        self.advance(); // consume tcp_connect
+                        self.tcp_connect_statement()
+                    }
+                    
+                    "tcp_listen" | "TCP_LISTEN" => {
+                        self.advance(); // consume tcp_listen
+                        self.tcp_listen_statement()
+                    }
+                    
+                    "tcp_send" | "TCP_SEND" => {
+                        self.advance(); // consume tcp_send
+                        self.tcp_send_statement()
+                    }
+                    
+                    "tcp_receive" | "TCP_RECEIVE" => {
+                        self.advance(); // consume tcp_receive
+                        self.tcp_receive_statement()
+                    }
+                    
+                    "tcp_close" | "TCP_CLOSE" => {
+                        self.advance(); // consume tcp_close
+                        self.tcp_close_statement()
+                    }
+                    
+                    "tcp_accept" | "TCP_ACCEPT" => {
+                        self.advance(); // consume tcp_accept
+                        self.tcp_accept_statement()
+                    }
+                    
                     "pack" | "PACK" => {
                         self.advance(); // consume pack
                         self.pack_statement()
@@ -1155,7 +1186,171 @@ impl Parser {
         }))
     }
     
-
+    // ============================================================================
+    // TCP Network I/O Statement Parsing
+    // ============================================================================
+    
+    fn tcp_connect_statement(&mut self) -> Result<Stmt, String> {
+        // tcp_connect(host, port) -> connection
+        self.expect(TokenKind::LeftParen, "Expected '(' after tcp_connect")?;
+        
+        let host = self.expression()?;
+        self.expect(TokenKind::Comma, "Expected ',' between host and port")?;
+        let port = self.expression()?;
+        self.expect(TokenKind::RightParen, "Expected ')' after port")?;
+        
+        // Expect arrow for assignment
+        if !self.match_token(TokenKind::ArrowRight) {
+            return Err("Expected '->' after tcp_connect call".to_string());
+        }
+        
+        let target = self.expect(TokenKind::Identifier, "Expected target variable name")?;
+        
+        // Create function call expression
+        let tcp_call = Expr::FunctionCall {
+            function: Box::new(Expr::Variable("tcp_connect".to_string())),
+            arguments: vec![host, port],
+        };
+        
+        Ok(Stmt::Assignment { 
+            name: target.lexeme.clone(), 
+            value: tcp_call 
+        })
+    }
+    
+    fn tcp_listen_statement(&mut self) -> Result<Stmt, String> {
+        // tcp_listen(port) -> listener
+        self.expect(TokenKind::LeftParen, "Expected '(' after tcp_listen")?;
+        
+        let port = self.expression()?;
+        self.expect(TokenKind::RightParen, "Expected ')' after port")?;
+        
+        // Expect arrow for assignment
+        if !self.match_token(TokenKind::ArrowRight) {
+            return Err("Expected '->' after tcp_listen call".to_string());
+        }
+        
+        let target = self.expect(TokenKind::Identifier, "Expected target variable name")?;
+        
+        // Create function call expression
+        let tcp_call = Expr::FunctionCall {
+            function: Box::new(Expr::Variable("tcp_listen".to_string())),
+            arguments: vec![port],
+        };
+        
+        Ok(Stmt::Assignment { 
+            name: target.lexeme.clone(), 
+            value: tcp_call 
+        })
+    }
+    
+    fn tcp_send_statement(&mut self) -> Result<Stmt, String> {
+        // tcp_send(connection, data) -> success
+        self.expect(TokenKind::LeftParen, "Expected '(' after tcp_send")?;
+        
+        let connection = self.expression()?;
+        self.expect(TokenKind::Comma, "Expected ',' between connection and data")?;
+        let data = self.expression()?;
+        self.expect(TokenKind::RightParen, "Expected ')' after data")?;
+        
+        // Expect arrow for assignment
+        if !self.match_token(TokenKind::ArrowRight) {
+            return Err("Expected '->' after tcp_send call".to_string());
+        }
+        
+        let target = self.expect(TokenKind::Identifier, "Expected target variable name")?;
+        
+        // Create function call expression
+        let tcp_call = Expr::FunctionCall {
+            function: Box::new(Expr::Variable("tcp_send".to_string())),
+            arguments: vec![connection, data],
+        };
+        
+        Ok(Stmt::Assignment { 
+            name: target.lexeme.clone(), 
+            value: tcp_call 
+        })
+    }
+    
+    fn tcp_receive_statement(&mut self) -> Result<Stmt, String> {
+        // tcp_receive(connection, max_bytes) -> data
+        self.expect(TokenKind::LeftParen, "Expected '(' after tcp_receive")?;
+        
+        let connection = self.expression()?;
+        self.expect(TokenKind::Comma, "Expected ',' between connection and max_bytes")?;
+        let max_bytes = self.expression()?;
+        self.expect(TokenKind::RightParen, "Expected ')' after max_bytes")?;
+        
+        // Expect arrow for assignment
+        if !self.match_token(TokenKind::ArrowRight) {
+            return Err("Expected '->' after tcp_receive call".to_string());
+        }
+        
+        let target = self.expect(TokenKind::Identifier, "Expected target variable name")?;
+        
+        // Create function call expression
+        let tcp_call = Expr::FunctionCall {
+            function: Box::new(Expr::Variable("tcp_receive".to_string())),
+            arguments: vec![connection, max_bytes],
+        };
+        
+        Ok(Stmt::Assignment { 
+            name: target.lexeme.clone(), 
+            value: tcp_call 
+        })
+    }
+    
+    fn tcp_close_statement(&mut self) -> Result<Stmt, String> {
+        // tcp_close(connection) -> success
+        self.expect(TokenKind::LeftParen, "Expected '(' after tcp_close")?;
+        
+        let connection = self.expression()?;
+        self.expect(TokenKind::RightParen, "Expected ')' after connection")?;
+        
+        // Expect arrow for assignment
+        if !self.match_token(TokenKind::ArrowRight) {
+            return Err("Expected '->' after tcp_close call".to_string());
+        }
+        
+        let target = self.expect(TokenKind::Identifier, "Expected target variable name")?;
+        
+        // Create function call expression
+        let tcp_call = Expr::FunctionCall {
+            function: Box::new(Expr::Variable("tcp_close".to_string())),
+            arguments: vec![connection],
+        };
+        
+        Ok(Stmt::Assignment { 
+            name: target.lexeme.clone(), 
+            value: tcp_call 
+        })
+    }
+    
+    fn tcp_accept_statement(&mut self) -> Result<Stmt, String> {
+        // tcp_accept(listener) -> connection
+        self.expect(TokenKind::LeftParen, "Expected '(' after tcp_accept")?;
+        
+        let listener = self.expression()?;
+        self.expect(TokenKind::RightParen, "Expected ')' after listener")?;
+        
+        // Expect arrow for assignment
+        if !self.match_token(TokenKind::ArrowRight) {
+            return Err("Expected '->' after tcp_accept call".to_string());
+        }
+        
+        let target = self.expect(TokenKind::Identifier, "Expected target variable name")?;
+        
+        // Create function call expression
+        let tcp_call = Expr::FunctionCall {
+            function: Box::new(Expr::Variable("tcp_accept".to_string())),
+            arguments: vec![listener],
+        };
+        
+        Ok(Stmt::Assignment { 
+            name: target.lexeme.clone(), 
+            value: tcp_call 
+        })
+    }
     
     // ============================================================================
     // Helper Methods
