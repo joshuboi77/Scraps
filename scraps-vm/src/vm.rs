@@ -8,14 +8,250 @@ use crate::compiler::Compiler;
 use std::fs;
 use std::path::{Path, PathBuf};
 use crate::tcp_socket_manager::TcpSocketManager;
+use crate::websocket_manager::WebSocketManager;
+use crate::udp_socket_manager::UdpSocketManager;
+use crate::tls_socket_manager::TlsSocketManager;
+use crate::event_loop_manager::{EventLoopManager, SocketType, EventType, EventFilter};
+use crate::connection_pool_manager::ConnectionPoolManager;
+use crate::timeout_manager::TimeoutManager;
+use crate::proxy_manager::ProxyManager;
+use crate::raw_socket_manager::RawSocketManager;
+use crate::network_interface_manager::{NetworkInterfaceManager, get_best_interface_for_binding, get_interface_by_ip};
+use crate::ipv6_manager::{IPv6Manager, DualStackMode, create_dual_stack_socket_addr};
 use std::sync::{Mutex, OnceLock};
+use ureq;
+use serde_json::{self, Value as JsonValue, Number as JsonNumber};
+// std::time and std::thread imports removed as they're unused
+use base64::{engine::general_purpose, Engine as _};
+use urlencoding;
 
 const REWIRED_KEY: &str = "__rewired__";
 
 static TCP_MANAGER_GLOBAL: OnceLock<Mutex<TcpSocketManager>> = OnceLock::new();
+static WS_MANAGER_GLOBAL: OnceLock<Mutex<WebSocketManager>> = OnceLock::new();
+static UDP_MANAGER_GLOBAL: OnceLock<Mutex<UdpSocketManager>> = OnceLock::new();
+static TLS_MANAGER_GLOBAL: OnceLock<Mutex<TlsSocketManager>> = OnceLock::new();
+static EVENT_LOOP_GLOBAL: OnceLock<Mutex<EventLoopManager>> = OnceLock::new();
+static POOL_MANAGER_GLOBAL: OnceLock<Mutex<ConnectionPoolManager>> = OnceLock::new();
+static TIMEOUT_MANAGER_GLOBAL: OnceLock<Mutex<TimeoutManager>> = OnceLock::new();
+static PROXY_MANAGER_GLOBAL: OnceLock<Mutex<ProxyManager>> = OnceLock::new();
+static RAW_MANAGER_GLOBAL: OnceLock<Mutex<RawSocketManager>> = OnceLock::new();
+static INTERFACE_MANAGER_GLOBAL: OnceLock<Mutex<NetworkInterfaceManager>> = OnceLock::new();
+static IPV6_MANAGER_GLOBAL: OnceLock<Mutex<IPv6Manager>> = OnceLock::new();
 
 fn tcp_manager_global() -> &'static Mutex<TcpSocketManager> {
     TCP_MANAGER_GLOBAL.get_or_init(|| Mutex::new(TcpSocketManager::new()))
+}
+
+fn ws_manager_global() -> &'static Mutex<WebSocketManager> {
+    WS_MANAGER_GLOBAL.get_or_init(|| Mutex::new(WebSocketManager::new()))
+}
+
+fn udp_manager_global() -> &'static Mutex<UdpSocketManager> {
+    UDP_MANAGER_GLOBAL.get_or_init(|| Mutex::new(UdpSocketManager::new()))
+}
+
+fn tls_manager_global() -> &'static Mutex<TlsSocketManager> {
+    TLS_MANAGER_GLOBAL.get_or_init(|| Mutex::new(TlsSocketManager::new()))
+}
+
+fn event_loop_global() -> &'static Mutex<EventLoopManager> {
+    EVENT_LOOP_GLOBAL.get_or_init(|| Mutex::new(EventLoopManager::new()))
+}
+
+fn pool_manager_global() -> &'static Mutex<ConnectionPoolManager> {
+    POOL_MANAGER_GLOBAL.get_or_init(|| Mutex::new(ConnectionPoolManager::new()))
+}
+
+fn timeout_manager_global() -> &'static Mutex<TimeoutManager> {
+    TIMEOUT_MANAGER_GLOBAL.get_or_init(|| Mutex::new(TimeoutManager::new()))
+}
+
+fn proxy_manager_global() -> &'static Mutex<ProxyManager> {
+    PROXY_MANAGER_GLOBAL.get_or_init(|| Mutex::new(ProxyManager::new()))
+}
+
+fn raw_manager_global() -> &'static Mutex<RawSocketManager> {
+    RAW_MANAGER_GLOBAL.get_or_init(|| Mutex::new(RawSocketManager::new()))
+}
+
+fn interface_manager_global() -> &'static Mutex<NetworkInterfaceManager> {
+    INTERFACE_MANAGER_GLOBAL.get_or_init(|| Mutex::new(NetworkInterfaceManager::new()))
+}
+
+fn ipv6_manager_global() -> &'static Mutex<IPv6Manager> {
+    IPV6_MANAGER_GLOBAL.get_or_init(|| Mutex::new(IPv6Manager::new()))
+}
+
+fn parse_headers_box(val: Value) -> Result<Vec<(String, String)>, String> {
+    match val {
+        Value::Box(items) => {
+            let mut out = Vec::new();
+            for pair in items {
+                match pair {
+                    Value::Box(kv) if kv.len() == 2 => {
+                        let k = match &kv[0] { Value::Str(s) => s.clone(), _ => return Err("HTTP headers: key must be string".to_string()) };
+                        let v = match &kv[1] { Value::Str(s) => s.clone(), _ => return Err("HTTP headers: value must be string".to_string()) };
+                        out.push((k, v));
+                    }
+                    _ => return Err("HTTP headers must be [[key, value], ...]".to_string()),
+                }
+            }
+            Ok(out)
+        }
+        _ => Err("HTTP headers must be a box of pairs".to_string()),
+    }
+}
+
+fn headers_to_value(headers: &[(String, String)]) -> Value {
+    let mut pairs = Vec::with_capacity(headers.len());
+    for (k, v) in headers {
+        pairs.push(Value::Box(vec![Value::Str(k.clone()), Value::Str(v.clone())]));
+    }
+    Value::Box(pairs)
+}
+
+fn http_get_impl(url: &str, headers: Option<&[(String, String)]>) -> Result<(i64, Vec<(String, String)>, String), String> {
+    let mut req = ureq::get(url);
+    if let Some(hs) = headers { for (k, v) in hs { req = req.set(k, v); } }
+    let resp = req.call().map_err(|e| format!("HTTP_GET error: {}", e))?;
+    let status = resp.status() as i64;
+    let names = resp.headers_names();
+    let mut hs = Vec::new();
+    for n in names { if let Some(v) = resp.header(&n) { hs.push((n.clone(), v.to_string())); } }
+    let body = resp.into_string().map_err(|e| format!("HTTP_GET body error: {}", e))?;
+    Ok((status, hs, body))
+}
+
+fn http_post_impl(url: &str, body: &str, headers: Option<&[(String, String)]>) -> Result<(i64, Vec<(String, String)>, String), String> {
+    let mut req = ureq::post(url);
+    let mut has_ct = false;
+    if let Some(hs) = headers {
+        for (k, v) in hs {
+            if k.eq_ignore_ascii_case("content-type") { has_ct = true; }
+            req = req.set(k, v);
+        }
+    }
+    if !has_ct { req = req.set("Content-Type", "text/plain; charset=utf-8"); }
+    let resp = req.send_string(body).map_err(|e| format!("HTTP_POST error: {}", e))?;
+    let status = resp.status() as i64;
+    let names = resp.headers_names();
+    let mut hs = Vec::new();
+    for n in names { if let Some(v) = resp.header(&n) { hs.push((n.clone(), v.to_string())); } }
+    let body = resp.into_string().map_err(|e| format!("HTTP_POST body error: {}", e))?;
+    Ok((status, hs, body))
+}
+
+fn http_put_impl(url: &str, body: &str, headers: Option<&[(String, String)]>) -> Result<(i64, Vec<(String, String)>, String), String> {
+    let mut req = ureq::put(url);
+    let mut has_ct = false;
+    if let Some(hs) = headers {
+        for (k, v) in hs {
+            if k.eq_ignore_ascii_case("content-type") { has_ct = true; }
+            req = req.set(k, v);
+        }
+    }
+    if !has_ct { req = req.set("Content-Type", "text/plain; charset=utf-8"); }
+    let resp = req.send_string(body).map_err(|e| format!("HTTP_PUT error: {}", e))?;
+    let status = resp.status() as i64;
+    let names = resp.headers_names();
+    let mut hs = Vec::new();
+    for n in names { if let Some(v) = resp.header(&n) { hs.push((n.clone(), v.to_string())); } }
+    let body = resp.into_string().map_err(|e| format!("HTTP_PUT body error: {}", e))?;
+    Ok((status, hs, body))
+}
+
+fn http_delete_impl(url: &str, headers: Option<&[(String, String)]>) -> Result<(i64, Vec<(String, String)>, String), String> {
+    let mut req = ureq::delete(url);
+    if let Some(hs) = headers { for (k, v) in hs { req = req.set(k, v); } }
+    let resp = req.call().map_err(|e| format!("HTTP_DELETE error: {}", e))?;
+    let status = resp.status() as i64;
+    let names = resp.headers_names();
+    let mut hs = Vec::new();
+    for n in names { if let Some(v) = resp.header(&n) { hs.push((n.clone(), v.to_string())); } }
+    let body = resp.into_string().map_err(|e| format!("HTTP_DELETE body error: {}", e))?;
+    Ok((status, hs, body))
+}
+
+fn dns_resolve_impl(hostname: &str) -> Result<String, String> {
+    use std::net::ToSocketAddrs;
+    
+    // Try to resolve the hostname to socket addresses
+    let mut addrs = format!("{}:80", hostname)
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS resolution failed for '{}': {}", hostname, e))?;
+    
+    // Get the first resolved address
+    if let Some(addr) = addrs.next() {
+        Ok(addr.ip().to_string())
+    } else {
+        Err(format!("No addresses found for hostname '{}'", hostname))
+    }
+}
+
+fn value_to_json(v: &Value) -> Result<JsonValue, String> {
+    match v {
+        Value::None => Ok(JsonValue::Null),
+        Value::Bool(b) => Ok(JsonValue::Bool(*b)),
+        Value::Int(n) => Ok(JsonValue::Number(JsonNumber::from(*n))),
+        Value::Float(f) => JsonNumber::from_f64(*f)
+            .map(JsonValue::Number)
+            .ok_or_else(|| "JSON encode: invalid float".to_string()),
+        Value::Str(s) => Ok(JsonValue::String(s.clone())),
+        Value::Box(items) => {
+            // If all items are [Str key, value] pairs, encode as object; else as array
+            let mut all_pairs = true;
+            for it in items.iter() {
+                match it {
+                    Value::Box(kv) if kv.len() == 2 && matches!(kv[0], Value::Str(_)) => {}
+                    _ => { all_pairs = false; break; }
+                }
+            }
+            if all_pairs {
+                let mut obj = serde_json::Map::new();
+                for it in items.iter() {
+                    if let Value::Box(kv) = it {
+                        let key = if let Value::Str(s) = &kv[0] { s.clone() } else { unreachable!() };
+                        let val = value_to_json(&kv[1])?;
+                        obj.insert(key, val);
+                    }
+                }
+                Ok(JsonValue::Object(obj))
+            } else {
+                let mut arr = Vec::with_capacity(items.len());
+                for it in items.iter() { arr.push(value_to_json(it)?); }
+                Ok(JsonValue::Array(arr))
+            }
+        }
+        Value::Function { .. } => Err("JSON encode: cannot encode function".to_string()),
+        Value::TcpConnection(_) | Value::TcpListener(_) | Value::WebSocket(_) | Value::UdpSocket(_) | Value::TlsConnection(_) | Value::TlsListener(_) | Value::RawSocket(_) => Err("JSON encode: cannot encode socket handle".to_string()),
+    }
+}
+
+fn json_to_value(j: &JsonValue) -> Value {
+    match j {
+        JsonValue::Null => Value::None,
+        JsonValue::Bool(b) => Value::Bool(*b),
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() { Value::Int(i) }
+            else if let Some(f) = n.as_f64() { Value::Float(f) }
+            else { Value::Float(0.0) }
+        }
+        JsonValue::String(s) => Value::Str(s.clone()),
+        JsonValue::Array(xs) => {
+            let mut vs = Vec::with_capacity(xs.len());
+            for x in xs { vs.push(json_to_value(x)); }
+            Value::Box(vs)
+        }
+        JsonValue::Object(map) => {
+            // Represent objects as box of [key, value] pairs
+            let mut pairs = Vec::with_capacity(map.len());
+            for (k, v) in map.iter() {
+                pairs.push(Value::Box(vec![Value::Str(k.clone()), json_to_value(v)]));
+            }
+            Value::Box(pairs)
+        }
+    }
 }
 
 fn is_rewired(env: &HashMap<String, Value>, name: &str) -> bool {
@@ -348,6 +584,111 @@ fn execute_function(
                 let func = local_env.get(&func_name).cloned().ok_or("Function not found")?;
                 match func_name.as_str() {
                     "box" => { if *arg_count != 0 { return Err("BOX expects 0 arguments".to_string()); } local_stack.push(Value::Box(vec![])); }
+                    "http_get" => {
+                        if *arg_count < 1 || *arg_count > 2 { return Err("HTTP_GET expects 1 or 2 arguments (url[, headers])".to_string()); }
+                        let url_val = local_stack.pop().expect("Expected URL for HTTP_GET");
+                        let url = match url_val { Value::Str(s) => s, _ => return Err("HTTP_GET url must be a string".to_string()) };
+                        let headers = if *arg_count == 2 {
+                            let headers_val = local_stack.pop().expect("Expected headers for HTTP_GET");
+                            Some(parse_headers_box(headers_val)?)
+                        } else { None };
+                        let (status, hs, body) = http_get_impl(&url, headers.as_deref())?;
+                        let resp = Value::Box(vec![
+                            Value::Int(status),
+                            headers_to_value(&hs),
+                            Value::Str(body),
+                        ]);
+                        local_stack.push(resp);
+                    }
+                    "json_encode" => {
+                        if *arg_count != 1 { return Err("JSON_ENCODE expects exactly 1 argument".to_string()); }
+                        let val = local_stack.pop().expect("Expected value for JSON_ENCODE");
+                        let j = value_to_json(&val)?;
+                        let s = serde_json::to_string(&j).map_err(|e| format!("JSON_ENCODE error: {}", e))?;
+                        local_stack.push(Value::Str(s));
+                    }
+                    "json_decode" => {
+                        if *arg_count != 1 { return Err("JSON_DECODE expects exactly 1 argument".to_string()); }
+                        let sval = local_stack.pop().expect("Expected string for JSON_DECODE");
+                        let s = match sval { Value::Str(s) => s, _ => return Err("JSON_DECODE argument must be a string".to_string()) };
+                        let j: JsonValue = serde_json::from_str(&s).map_err(|e| format!("JSON_DECODE error: {}", e))?;
+                        let v = json_to_value(&j);
+                        local_stack.push(v);
+                    }
+                    "http_post" => {
+                        if *arg_count < 2 || *arg_count > 3 { return Err("HTTP_POST expects 2 or 3 arguments (url, data[, headers])".to_string()); }
+                        let headers = if *arg_count == 3 {
+                            let headers_val = local_stack.pop().expect("Expected headers for HTTP_POST");
+                            Some(parse_headers_box(headers_val)?)
+                        } else { None };
+                        let data_val = local_stack.pop().expect("Expected data for HTTP_POST");
+                        let url_val = local_stack.pop().expect("Expected URL for HTTP_POST");
+                        let url = match url_val { Value::Str(s) => s, _ => return Err("HTTP_POST url must be a string".to_string()) };
+                        let data = match data_val { Value::Str(s) => s, _ => return Err("HTTP_POST data must be a string".to_string()) };
+                        let (status, hs, body) = http_post_impl(&url, &data, headers.as_deref())?;
+                        let resp = Value::Box(vec![
+                            Value::Int(status),
+                            headers_to_value(&hs),
+                            Value::Str(body),
+                        ]);
+                        local_stack.push(resp);
+                    }
+                    "http_put" => {
+                        if *arg_count < 2 || *arg_count > 3 { return Err("HTTP_PUT expects 2 or 3 arguments (url, data[, headers])".to_string()); }
+                        let headers = if *arg_count == 3 {
+                            let headers_val = local_stack.pop().expect("Expected headers for HTTP_PUT");
+                            Some(parse_headers_box(headers_val)?)
+                        } else { None };
+                        let data_val = local_stack.pop().expect("Expected data for HTTP_PUT");
+                        let url_val = local_stack.pop().expect("Expected URL for HTTP_PUT");
+                        let url = match url_val { Value::Str(s) => s, _ => return Err("HTTP_PUT url must be a string".to_string()) };
+                        let data = match data_val { Value::Str(s) => s, _ => return Err("HTTP_PUT data must be a string".to_string()) };
+                        let (status, hs, body) = http_put_impl(&url, &data, headers.as_deref())?;
+                        let resp = Value::Box(vec![ Value::Int(status), headers_to_value(&hs), Value::Str(body) ]);
+                        local_stack.push(resp);
+                    }
+                    "base64_encode" => {
+                        if *arg_count != 1 { return Err("BASE64_ENCODE expects exactly 1 argument".to_string()); }
+                        let sval = local_stack.pop().expect("Expected string for BASE64_ENCODE");
+                        let s = match sval { Value::Str(s) => s, _ => return Err("BASE64_ENCODE argument must be a string".to_string()) };
+                        let out = general_purpose::STANDARD.encode(s.as_bytes());
+                        local_stack.push(Value::Str(out));
+                    }
+                    "base64_decode" => {
+                        if *arg_count != 1 { return Err("BASE64_DECODE expects exactly 1 argument".to_string()); }
+                        let sval = local_stack.pop().expect("Expected string for BASE64_DECODE");
+                        let s = match sval { Value::Str(s) => s, _ => return Err("BASE64_DECODE argument must be a string".to_string()) };
+                        let bytes = general_purpose::STANDARD.decode(s.as_bytes()).map_err(|e| format!("BASE64_DECODE error: {}", e))?;
+                        let out = String::from_utf8(bytes).map_err(|e| format!("BASE64_DECODE UTF-8 error: {}", e))?;
+                        local_stack.push(Value::Str(out));
+                    }
+                    "url_encode" => {
+                        if *arg_count != 1 { return Err("URL_ENCODE expects exactly 1 argument".to_string()); }
+                        let sval = local_stack.pop().expect("Expected string for URL_ENCODE");
+                        let s = match sval { Value::Str(s) => s, _ => return Err("URL_ENCODE argument must be a string".to_string()) };
+                        let out = urlencoding::encode(&s).into_owned();
+                        local_stack.push(Value::Str(out));
+                    }
+                    "url_decode" => {
+                        if *arg_count != 1 { return Err("URL_DECODE expects exactly 1 argument".to_string()); }
+                        let sval = local_stack.pop().expect("Expected string for URL_DECODE");
+                        let s = match sval { Value::Str(s) => s, _ => return Err("URL_DECODE argument must be a string".to_string()) };
+                        let out = urlencoding::decode(&s).map_err(|e| format!("URL_DECODE error: {}", e))?.into_owned();
+                        local_stack.push(Value::Str(out));
+                    }
+                    "http_delete" => {
+                        if *arg_count < 1 || *arg_count > 2 { return Err("HTTP_DELETE expects 1 or 2 arguments (url[, headers])".to_string()); }
+                        let url_val = local_stack.pop().expect("Expected URL for HTTP_DELETE");
+                        let url = match url_val { Value::Str(s) => s, _ => return Err("HTTP_DELETE url must be a string".to_string()) };
+                        let headers = if *arg_count == 2 {
+                            let headers_val = local_stack.pop().expect("Expected headers for HTTP_DELETE");
+                            Some(parse_headers_box(headers_val)?)
+                        } else { None };
+                        let (status, hs, body) = http_delete_impl(&url, headers.as_deref())?;
+                        let resp = Value::Box(vec![ Value::Int(status), headers_to_value(&hs), Value::Str(body) ]);
+                        local_stack.push(resp);
+                    }
+                    
                     "source" => {
                         if *arg_count != 1 { return Err("SOURCE expects exactly 1 argument".to_string()); }
                         let filename = local_stack.pop().expect("Expected filename for SOURCE");
@@ -1050,6 +1391,72 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
         body: vec![],
         rewire_target: None,
     });
+    env.insert("http_get".to_string(), Value::Function {
+        name: "http_get".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("http_post".to_string(), Value::Function {
+        name: "http_post".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("http_put".to_string(), Value::Function {
+        name: "http_put".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("http_delete".to_string(), Value::Function {
+        name: "http_delete".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("dns_resolve".to_string(), Value::Function {
+        name: "dns_resolve".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("json_encode".to_string(), Value::Function {
+        name: "json_encode".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("json_decode".to_string(), Value::Function {
+        name: "json_decode".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("base64_encode".to_string(), Value::Function {
+        name: "base64_encode".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("base64_decode".to_string(), Value::Function {
+        name: "base64_decode".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("url_encode".to_string(), Value::Function {
+        name: "url_encode".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("url_decode".to_string(), Value::Function {
+        name: "url_decode".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
     env.insert("source".to_string(), Value::Function {
         name: "source".to_string(),
         params: vec![],
@@ -1149,6 +1556,496 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
         body: vec![],
         rewire_target: None,
     });
+    
+    // UDP Network I/O Functions
+    env.insert("udp_bind".to_string(), Value::Function {
+        name: "udp_bind".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("udp_send".to_string(), Value::Function {
+        name: "udp_send".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("udp_receive".to_string(), Value::Function {
+        name: "udp_receive".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("udp_try_receive".to_string(), Value::Function {
+        name: "udp_try_receive".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("udp_close".to_string(), Value::Function {
+        name: "udp_close".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    
+    // UDP Multicast and Broadcast Functions
+    env.insert("udp_join_multicast".to_string(), Value::Function {
+        name: "udp_join_multicast".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("udp_leave_multicast".to_string(), Value::Function {
+        name: "udp_leave_multicast".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("udp_set_multicast_ttl".to_string(), Value::Function {
+        name: "udp_set_multicast_ttl".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("udp_set_multicast_loopback".to_string(), Value::Function {
+        name: "udp_set_multicast_loopback".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("udp_set_broadcast".to_string(), Value::Function {
+        name: "udp_set_broadcast".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("udp_send_broadcast".to_string(), Value::Function {
+        name: "udp_send_broadcast".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("udp_send_multicast".to_string(), Value::Function {
+        name: "udp_send_multicast".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("udp_is_multicast".to_string(), Value::Function {
+        name: "udp_is_multicast".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("udp_is_broadcast".to_string(), Value::Function {
+        name: "udp_is_broadcast".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    
+    // TLS Network I/O Functions
+    env.insert("tls_connect".to_string(), Value::Function {
+        name: "tls_connect".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("tls_listen".to_string(), Value::Function {
+        name: "tls_listen".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("tls_accept".to_string(), Value::Function {
+        name: "tls_accept".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("tls_send".to_string(), Value::Function {
+        name: "tls_send".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("tls_receive".to_string(), Value::Function {
+        name: "tls_receive".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("tls_try_receive".to_string(), Value::Function {
+        name: "tls_try_receive".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("tls_close".to_string(), Value::Function {
+        name: "tls_close".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    
+    // Event Loop / Async Network I/O Functions
+    env.insert("event_register".to_string(), Value::Function {
+        name: "event_register".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("event_unregister".to_string(), Value::Function {
+        name: "event_unregister".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("event_poll".to_string(), Value::Function {
+        name: "event_poll".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("event_wait".to_string(), Value::Function {
+        name: "event_wait".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("event_wait_any".to_string(), Value::Function {
+        name: "event_wait_any".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    
+    // Connection Pool Functions
+    env.insert("pool_get_connection".to_string(), Value::Function {
+        name: "pool_get_connection".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("pool_return_connection".to_string(), Value::Function {
+        name: "pool_return_connection".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("pool_stats".to_string(), Value::Function {
+        name: "pool_stats".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("pool_clear".to_string(), Value::Function {
+        name: "pool_clear".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("pool_configure".to_string(), Value::Function {
+        name: "pool_configure".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    
+    // Timeout Management Functions
+    env.insert("timeout_set_global".to_string(), Value::Function {
+        name: "timeout_set_global".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("timeout_set_specific".to_string(), Value::Function {
+        name: "timeout_set_specific".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("timeout_get_info".to_string(), Value::Function {
+        name: "timeout_get_info".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("timeout_remove".to_string(), Value::Function {
+        name: "timeout_remove".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("timeout_clear".to_string(), Value::Function {
+        name: "timeout_clear".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("timeout_summary".to_string(), Value::Function {
+        name: "timeout_summary".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    
+    // Proxy Management Functions
+    env.insert("proxy_set_global".to_string(), Value::Function {
+        name: "proxy_set_global".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("proxy_set_specific".to_string(), Value::Function {
+        name: "proxy_set_specific".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("proxy_set_default".to_string(), Value::Function {
+        name: "proxy_set_default".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("proxy_get_info".to_string(), Value::Function {
+        name: "proxy_get_info".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("proxy_remove_global".to_string(), Value::Function {
+        name: "proxy_remove_global".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("proxy_remove_specific".to_string(), Value::Function {
+        name: "proxy_remove_specific".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("proxy_clear_all".to_string(), Value::Function {
+        name: "proxy_clear_all".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("proxy_add_bypass".to_string(), Value::Function {
+        name: "proxy_add_bypass".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("proxy_remove_bypass".to_string(), Value::Function {
+        name: "proxy_remove_bypass".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("proxy_get_bypass_list".to_string(), Value::Function {
+        name: "proxy_get_bypass_list".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("proxy_stats".to_string(), Value::Function {
+        name: "proxy_stats".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    
+    // Raw Socket Functions
+    env.insert("raw_socket_create".to_string(), Value::Function {
+        name: "raw_socket_create".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("raw_socket_set_header_included".to_string(), Value::Function {
+        name: "raw_socket_set_header_included".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("raw_socket_send".to_string(), Value::Function {
+        name: "raw_socket_send".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("raw_socket_receive".to_string(), Value::Function {
+        name: "raw_socket_receive".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("raw_socket_close".to_string(), Value::Function {
+        name: "raw_socket_close".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("raw_socket_info".to_string(), Value::Function {
+        name: "raw_socket_info".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("packet_build_icmp_echo".to_string(), Value::Function {
+        name: "packet_build_icmp_echo".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("packet_build_ipv4_header".to_string(), Value::Function {
+        name: "packet_build_ipv4_header".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("packet_calculate_checksum".to_string(), Value::Function {
+        name: "packet_calculate_checksum".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    
+    // Network Interface Functions
+    env.insert("get_interfaces".to_string(), Value::Function {
+        name: "get_interfaces".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("get_interface_info".to_string(), Value::Function {
+        name: "get_interface_info".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("get_interface_stats".to_string(), Value::Function {
+        name: "get_interface_stats".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("get_primary_interface".to_string(), Value::Function {
+        name: "get_primary_interface".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("get_loopback_interface".to_string(), Value::Function {
+        name: "get_loopback_interface".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("get_interfaces_by_type".to_string(), Value::Function {
+        name: "get_interfaces_by_type".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("get_up_interfaces".to_string(), Value::Function {
+        name: "get_up_interfaces".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("get_interface_by_ip".to_string(), Value::Function {
+        name: "get_interface_by_ip".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("get_best_interface".to_string(), Value::Function {
+        name: "get_best_interface".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    
+    // IPv6 and Dual-Stack Functions
+    env.insert("ipv6_set_dual_stack_mode".to_string(), Value::Function {
+        name: "ipv6_set_dual_stack_mode".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("ipv6_get_dual_stack_mode".to_string(), Value::Function {
+        name: "ipv6_get_dual_stack_mode".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("ipv6_resolve_dual_stack".to_string(), Value::Function {
+        name: "ipv6_resolve_dual_stack".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("ipv6_parse_address".to_string(), Value::Function {
+        name: "ipv6_parse_address".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("ipv6_get_multicast_address".to_string(), Value::Function {
+        name: "ipv6_get_multicast_address".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("ipv6_is_ipv6_address".to_string(), Value::Function {
+        name: "ipv6_is_ipv6_address".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("ipv6_is_ipv4_address".to_string(), Value::Function {
+        name: "ipv6_is_ipv4_address".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("ipv6_get_address_info".to_string(), Value::Function {
+        name: "ipv6_get_address_info".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("ipv6_get_config".to_string(), Value::Function {
+        name: "ipv6_get_config".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("ipv6_create_dual_stack_socket".to_string(), Value::Function {
+        name: "ipv6_create_dual_stack_socket".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    
+    // WebSocket built-ins
+    env.insert("ws_connect".to_string(), Value::Function { name: "ws_connect".to_string(), params: vec![], body: vec![], rewire_target: None });
+    env.insert("ws_send".to_string(), Value::Function { name: "ws_send".to_string(), params: vec![], body: vec![], rewire_target: None });
+    env.insert("ws_receive".to_string(), Value::Function { name: "ws_receive".to_string(), params: vec![], body: vec![], rewire_target: None });
+    env.insert("ws_close".to_string(), Value::Function { name: "ws_close".to_string(), params: vec![], body: vec![], rewire_target: None });
+    env.insert("ws_try_receive".to_string(), Value::Function { name: "ws_try_receive".to_string(), params: vec![], body: vec![], rewire_target: None });
+    env.insert("ws_send_binary".to_string(), Value::Function { name: "ws_send_binary".to_string(), params: vec![], body: vec![], rewire_target: None });
+    env.insert("ws_receive_bytes".to_string(), Value::Function { name: "ws_receive_bytes".to_string(), params: vec![], body: vec![], rewire_target: None });
+    env.insert("ws_try_receive_bytes".to_string(), Value::Function { name: "ws_try_receive_bytes".to_string(), params: vec![], body: vec![], rewire_target: None });
+    
+    env.insert("tcp_try_receive".to_string(), Value::Function { name: "tcp_try_receive".to_string(), params: vec![], body: vec![], rewire_target: None });
+    env.insert("dns_lookup".to_string(), Value::Function { name: "dns_lookup".to_string(), params: vec![], body: vec![], rewire_target: None });
+    env.insert("net_wait_any".to_string(), Value::Function { name: "net_wait_any".to_string(), params: vec![], body: vec![], rewire_target: None });
     
     // Math constants
     env.insert("PI".to_string(), Value::Float(std::f64::consts::PI));
@@ -1626,6 +2523,203 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                             Err(e) => return Err(format!("WRITE error: {}", e)),
                         }
                     }
+                    "http_get" => {
+                        if *arg_count < 1 || *arg_count > 2 { return Err("HTTP_GET expects 1 or 2 arguments (url[, headers])".to_string()); }
+                        let url_val = stack.pop().expect("Expected URL for HTTP_GET");
+                        let url = match url_val { Value::Str(s) => s, _ => return Err("HTTP_GET url must be a string".to_string()) };
+                        let headers = if *arg_count == 2 {
+                            let headers_val = stack.pop().expect("Expected headers for HTTP_GET");
+                            Some(parse_headers_box(headers_val)?)
+                        } else { None };
+                        let (status, hs, body) = http_get_impl(&url, headers.as_deref())?;
+                        let resp = Value::Box(vec![
+                            Value::Int(status),
+                            headers_to_value(&hs),
+                            Value::Str(body),
+                        ]);
+                        stack.push(resp);
+                    }
+                    // WebSocket built-ins (top-level)
+                    "ws_connect" => {
+                        if *arg_count != 1 { return Err("WS_CONNECT expects 1 argument (url)".to_string()); }
+                        let url_val = stack.pop().expect("Expected URL for WS_CONNECT");
+                        let url = match url_val { Value::Str(s) => s, _ => return Err("WS_CONNECT url must be a string".to_string()) };
+                        let mut mgr = ws_manager_global().lock().map_err(|_| "WS manager poisoned".to_string())?;
+                        match mgr.connect(&url) { Ok(id) => stack.push(Value::WebSocket(id)), Err(e) => return Err(e) }
+                    }
+                    "ws_send" => {
+                        if *arg_count != 2 { return Err("WS_SEND expects 2 arguments (ws, text)".to_string()); }
+                        let text_val = stack.pop().expect("Expected text for WS_SEND");
+                        let ws_val = stack.pop().expect("Expected ws handle for WS_SEND");
+                        let text = match text_val { Value::Str(s) => s, _ => return Err("WS_SEND text must be a string".to_string()) };
+                        let id = match ws_val { Value::WebSocket(id) => id, _ => return Err("WS_SEND expects WebSocket handle".to_string()) };
+                        let mut mgr = ws_manager_global().lock().map_err(|_| "WS manager poisoned".to_string())?;
+                        match mgr.send_text(id, &text) { Ok(_) => stack.push(Value::Bool(true)), Err(e) => return Err(e) }
+                    }
+                    "ws_receive" => {
+                        if *arg_count != 1 { return Err("WS_RECEIVE expects 1 argument (ws)".to_string()); }
+                        let ws_val = stack.pop().expect("Expected ws handle for WS_RECEIVE");
+                        let id = match ws_val { Value::WebSocket(id) => id, _ => return Err("WS_RECEIVE expects WebSocket handle".to_string()) };
+                        let mut mgr = ws_manager_global().lock().map_err(|_| "WS manager poisoned".to_string())?;
+                        match mgr.receive_text(id) { Ok(s) => stack.push(Value::Str(s)), Err(e) => return Err(e) }
+                    }
+                    "ws_send_binary" => {
+                        if *arg_count != 2 { return Err("WS_SEND_BINARY expects 2 arguments (ws, data)".to_string()); }
+                        let data_val = stack.pop().expect("Expected data for WS_SEND_BINARY");
+                        let ws_val = stack.pop().expect("Expected ws handle for WS_SEND_BINARY");
+                        let bytes = match data_val { Value::Str(s) => s.into_bytes(), _ => return Err("WS_SEND_BINARY data must be a string".to_string()) };
+                        let id = match ws_val { Value::WebSocket(id) => id, _ => return Err("WS_SEND_BINARY expects WebSocket handle".to_string()) };
+                        let mut mgr = ws_manager_global().lock().map_err(|_| "WS manager poisoned".to_string())?;
+                        match mgr.send_binary(id, &bytes) { Ok(_) => stack.push(Value::Bool(true)), Err(e) => return Err(e) }
+                    }
+                    "ws_receive_bytes" => {
+                        if *arg_count != 1 { return Err("WS_RECEIVE_BYTES expects 1 argument (ws)".to_string()); }
+                        let ws_val = stack.pop().expect("Expected ws handle for WS_RECEIVE_BYTES");
+                        let id = match ws_val { Value::WebSocket(id) => id, _ => return Err("WS_RECEIVE_BYTES expects WebSocket handle".to_string()) };
+                        let mut mgr = ws_manager_global().lock().map_err(|_| "WS manager poisoned".to_string())?;
+                        match mgr.receive_bytes(id) { Ok(v) => {
+                            let mut out = Vec::with_capacity(v.len());
+                            for b in v { out.push(Value::Int(b as i64)); }
+                            stack.push(Value::Box(out));
+                        }, Err(e) => return Err(e) }
+                    }
+                    "ws_try_receive_bytes" => {
+                        if *arg_count != 1 { return Err("WS_TRY_RECEIVE_BYTES expects 1 argument (ws)".to_string()); }
+                        let ws_val = stack.pop().expect("Expected ws handle for WS_TRY_RECEIVE_BYTES");
+                        let id = match ws_val { Value::WebSocket(id) => id, _ => return Err("WS_TRY_RECEIVE_BYTES expects WebSocket handle".to_string()) };
+                        let mut mgr = ws_manager_global().lock().map_err(|_| "WS manager poisoned".to_string())?;
+                        match mgr.try_receive_bytes(id) { Ok(Some(v)) => { let mut out=Vec::new(); for b in v { out.push(Value::Int(b as i64)); } stack.push(Value::Box(out)); }, Ok(None) => stack.push(Value::Box(vec![])), Err(e) => return Err(e) }
+                    }
+                    "tcp_try_receive" => {
+                        if *arg_count != 2 { return Err("TCP_TRY_RECEIVE expects 2 arguments (connection, max_bytes)".to_string()); }
+                        let max_val = stack.pop().expect("Expected max_bytes for TCP_TRY_RECEIVE");
+                        let conn_val = stack.pop().expect("Expected connection for TCP_TRY_RECEIVE");
+                        let max_bytes: usize = match max_val { Value::Int(n) => n as usize, Value::Float(f) => f as usize, _ => return Err("TCP_TRY_RECEIVE max_bytes must be a number".to_string()) };
+                        let id = match conn_val { Value::TcpConnection(id) => id, _ => return Err("TCP_TRY_RECEIVE expects TCP connection".to_string()) };
+                        let mut mgr = tcp_manager_global().lock().map_err(|_| "TCP manager poisoned".to_string())?;
+                        match mgr.try_receive(id, max_bytes) { Ok(Some(v)) => {
+                            match String::from_utf8(v) { Ok(s) => stack.push(Value::Str(s)), Err(_e)=> stack.push(Value::Str(String::new())) }
+                        }, Ok(None) => stack.push(Value::Str(String::new())), Err(e) => return Err(e) }
+                    }
+                    "ws_try_receive" => {
+                        if *arg_count != 1 { return Err("WS_TRY_RECEIVE expects 1 argument (ws)".to_string()); }
+                        let ws_val = stack.pop().expect("Expected ws handle for WS_TRY_RECEIVE");
+                        let id = match ws_val { Value::WebSocket(id) => id, _ => return Err("WS_TRY_RECEIVE expects WebSocket handle".to_string()) };
+                        let mut mgr = ws_manager_global().lock().map_err(|_| "WS manager poisoned".to_string())?;
+                        match mgr.try_receive_text(id) { Ok(Some(s)) => stack.push(Value::Str(s)), Ok(None) => stack.push(Value::Str(String::new())), Err(e) => return Err(e) }
+                    }
+                    "ws_close" => {
+                        if *arg_count != 1 { return Err("WS_CLOSE expects 1 argument (ws)".to_string()); }
+                        let ws_val = stack.pop().expect("Expected ws handle for WS_CLOSE");
+                        let id = match ws_val { Value::WebSocket(id) => id, _ => return Err("WS_CLOSE expects WebSocket handle".to_string()) };
+                        let mut mgr = ws_manager_global().lock().map_err(|_| "WS manager poisoned".to_string())?;
+                        match mgr.close(id) { Ok(_) => stack.push(Value::Bool(true)), Err(e) => return Err(e) }
+                    }
+                    "http_post" => {
+                        if *arg_count < 2 || *arg_count > 3 { return Err("HTTP_POST expects 2 or 3 arguments (url, data[, headers])".to_string()); }
+                        let headers = if *arg_count == 3 {
+                            let headers_val = stack.pop().expect("Expected headers for HTTP_POST");
+                            Some(parse_headers_box(headers_val)?)
+                        } else { None };
+                        let data_val = stack.pop().expect("Expected data for HTTP_POST");
+                        let url_val = stack.pop().expect("Expected URL for HTTP_POST");
+                        let url = match url_val { Value::Str(s) => s, _ => return Err("HTTP_POST url must be a string".to_string()) };
+                        let data = match data_val { Value::Str(s) => s, _ => return Err("HTTP_POST data must be a string".to_string()) };
+                        let (status, hs, body) = http_post_impl(&url, &data, headers.as_deref())?;
+                        let resp = Value::Box(vec![
+                            Value::Int(status),
+                            headers_to_value(&hs),
+                            Value::Str(body),
+                        ]);
+                        stack.push(resp);
+                    }
+                    "http_put" => {
+                        if *arg_count < 2 || *arg_count > 3 { return Err("HTTP_PUT expects 2 or 3 arguments (url, data[, headers])".to_string()); }
+                        let headers = if *arg_count == 3 {
+                            let headers_val = stack.pop().expect("Expected headers for HTTP_PUT");
+                            Some(parse_headers_box(headers_val)?)
+                        } else { None };
+                        let data_val = stack.pop().expect("Expected data for HTTP_PUT");
+                        let url_val = stack.pop().expect("Expected URL for HTTP_PUT");
+                        let url = match url_val { Value::Str(s) => s, _ => return Err("HTTP_PUT url must be a string".to_string()) };
+                        let data = match data_val { Value::Str(s) => s, _ => return Err("HTTP_PUT data must be a string".to_string()) };
+                        let (status, hs, body) = http_put_impl(&url, &data, headers.as_deref())?;
+                        let resp = Value::Box(vec![
+                            Value::Int(status),
+                            headers_to_value(&hs),
+                            Value::Str(body),
+                        ]);
+                        stack.push(resp);
+                    }
+                    "http_delete" => {
+                        if *arg_count < 1 || *arg_count > 2 { return Err("HTTP_DELETE expects 1 or 2 arguments (url[, headers])".to_string()); }
+                        let url_val = stack.pop().expect("Expected URL for HTTP_DELETE");
+                        let url = match url_val { Value::Str(s) => s, _ => return Err("HTTP_DELETE url must be a string".to_string()) };
+                        let headers = if *arg_count == 2 {
+                            let headers_val = stack.pop().expect("Expected headers for HTTP_DELETE");
+                            Some(parse_headers_box(headers_val)?)
+                        } else { None };
+                        let (status, hs, body) = http_delete_impl(&url, headers.as_deref())?;
+                        let resp = Value::Box(vec![
+                            Value::Int(status),
+                            headers_to_value(&hs),
+                            Value::Str(body),
+                        ]);
+                        stack.push(resp);
+                    }
+                    "dns_resolve" => {
+                        if *arg_count != 1 { return Err("DNS_RESOLVE expects exactly 1 argument".to_string()); }
+                        let hostname_val = stack.pop().expect("Expected hostname for DNS_RESOLVE");
+                        let hostname = match hostname_val { Value::Str(s) => s, _ => return Err("DNS_RESOLVE hostname must be a string".to_string()) };
+                        match dns_resolve_impl(&hostname) {
+                            Ok(ip_address) => stack.push(Value::Str(ip_address)),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    "json_encode" => {
+                        if *arg_count != 1 { return Err("JSON_ENCODE expects exactly 1 argument".to_string()); }
+                        let val = stack.pop().expect("Expected value for JSON_ENCODE");
+                        let j = value_to_json(&val)?;
+                        let s = serde_json::to_string(&j).map_err(|e| format!("JSON_ENCODE error: {}", e))?;
+                        stack.push(Value::Str(s));
+                    }
+                    "json_decode" => {
+                        if *arg_count != 1 { return Err("JSON_DECODE expects exactly 1 argument".to_string()); }
+                        let sval = stack.pop().expect("Expected string for JSON_DECODE");
+                        let s = match sval { Value::Str(s) => s, _ => return Err("JSON_DECODE argument must be a string".to_string()) };
+                        let j: JsonValue = serde_json::from_str(&s).map_err(|e| format!("JSON_DECODE error: {}", e))?;
+                        let v = json_to_value(&j);
+                        stack.push(v);
+                    }
+                    "base64_encode" => {
+                        if *arg_count != 1 { return Err("BASE64_ENCODE expects exactly 1 argument".to_string()); }
+                        let sval = stack.pop().expect("Expected string for BASE64_ENCODE");
+                        let s = match sval { Value::Str(s) => s, _ => return Err("BASE64_ENCODE argument must be a string".to_string()) };
+                        let out = general_purpose::STANDARD.encode(s.as_bytes());
+                        stack.push(Value::Str(out));
+                    }
+                    "base64_decode" => {
+                        if *arg_count != 1 { return Err("BASE64_DECODE expects exactly 1 argument".to_string()); }
+                        let sval = stack.pop().expect("Expected string for BASE64_DECODE");
+                        let s = match sval { Value::Str(s) => s, _ => return Err("BASE64_DECODE argument must be a string".to_string()) };
+                        let bytes = general_purpose::STANDARD.decode(s.as_bytes()).map_err(|e| format!("BASE64_DECODE error: {}", e))?;
+                        let out = String::from_utf8(bytes).map_err(|e| format!("BASE64_DECODE UTF-8 error: {}", e))?;
+                        stack.push(Value::Str(out));
+                    }
+                    "url_encode" => {
+                        if *arg_count != 1 { return Err("URL_ENCODE expects exactly 1 argument".to_string()); }
+                        let sval = stack.pop().expect("Expected string for URL_ENCODE");
+                        let s = match sval { Value::Str(s) => s, _ => return Err("URL_ENCODE argument must be a string".to_string()) };
+                        let out = urlencoding::encode(&s).into_owned();
+                        stack.push(Value::Str(out));
+                    }
+                    "url_decode" => {
+                        if *arg_count != 1 { return Err("URL_DECODE expects exactly 1 argument".to_string()); }
+                        let sval = stack.pop().expect("Expected string for URL_DECODE");
+                        let s = match sval { Value::Str(s) => s, _ => return Err("URL_DECODE argument must be a string".to_string()) };
+                        let out = urlencoding::decode(&s).map_err(|e| format!("URL_DECODE error: {}", e))?.into_owned();
+                        stack.push(Value::Str(out));
+                    }
                     // TCP Network I/O built-ins (top-level)
                     "tcp_connect" => {
                         if *arg_count != 2 { return Err("TCP_CONNECT expects exactly 2 arguments (host, port)".to_string()); }
@@ -1678,6 +2772,1299 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                         let mut mgr = tcp_manager_global().lock().map_err(|_| "TCP manager poisoned".to_string())?;
                         match mgr.accept(id) { Ok(conn_id) => stack.push(Value::TcpConnection(conn_id)), Err(e) => return Err(e) }
                     }
+                    
+                    // UDP Network I/O built-ins (top-level)
+                    "udp_bind" => {
+                        if *arg_count != 1 { return Err("UDP_BIND expects exactly 1 argument (address)".to_string()); }
+                        let addr_val = stack.pop().expect("Expected address for UDP_BIND");
+                        let addr = match addr_val { Value::Str(s) => s, _ => return Err("UDP_BIND address must be a string".to_string()) };
+                        let mut mgr = udp_manager_global().lock().map_err(|_| "UDP manager poisoned".to_string())?;
+                        match mgr.bind(&addr) { Ok(id) => stack.push(Value::UdpSocket(id)), Err(e) => return Err(e) }
+                    }
+                    "udp_send" => {
+                        if *arg_count != 3 { return Err("UDP_SEND expects exactly 3 arguments (socket, data, target_addr)".to_string()); }
+                        let addr_val = stack.pop().expect("Expected target address for UDP_SEND");
+                        let data_val = stack.pop().expect("Expected data for UDP_SEND");
+                        let socket_val = stack.pop().expect("Expected socket for UDP_SEND");
+                        let addr = match addr_val { Value::Str(s) => s, _ => return Err("UDP_SEND target address must be a string".to_string()) };
+                        let data = match data_val { Value::Str(s) => s, _ => return Err("UDP_SEND data must be a string".to_string()) };
+                        let id = match socket_val { Value::UdpSocket(id) => id, _ => return Err("UDP_SEND expects UDP socket".to_string()) };
+                        let mut mgr = udp_manager_global().lock().map_err(|_| "UDP manager poisoned".to_string())?;
+                        match mgr.send(id, data.as_bytes(), &addr) { Ok(_) => stack.push(Value::Bool(true)), Err(e) => return Err(e) }
+                    }
+                    "udp_receive" => {
+                        if *arg_count != 2 { return Err("UDP_RECEIVE expects exactly 2 arguments (socket, max_bytes)".to_string()); }
+                        let max_val = stack.pop().expect("Expected max_bytes for UDP_RECEIVE");
+                        let socket_val = stack.pop().expect("Expected socket for UDP_RECEIVE");
+                        let max_bytes: usize = match max_val { Value::Int(n) => n as usize, Value::Float(f) => f as usize, _ => return Err("UDP_RECEIVE max_bytes must be a number".to_string()) };
+                        let id = match socket_val { Value::UdpSocket(id) => id, _ => return Err("UDP_RECEIVE expects UDP socket".to_string()) };
+                        let mut mgr = udp_manager_global().lock().map_err(|_| "UDP manager poisoned".to_string())?;
+                        match mgr.receive(id, max_bytes) {
+                            Ok((data, src_addr)) => {
+                                let data_str = String::from_utf8_lossy(&data).to_string();
+                                stack.push(Value::Box(vec![Value::Str(data_str), Value::Str(src_addr)]));
+                            }
+                            Err(e) => return Err(e)
+                        }
+                    }
+                    "udp_try_receive" => {
+                        if *arg_count != 2 { return Err("UDP_TRY_RECEIVE expects exactly 2 arguments (socket, max_bytes)".to_string()); }
+                        let max_val = stack.pop().expect("Expected max_bytes for UDP_TRY_RECEIVE");
+                        let socket_val = stack.pop().expect("Expected socket for UDP_TRY_RECEIVE");
+                        let max_bytes: usize = match max_val { Value::Int(n) => n as usize, Value::Float(f) => f as usize, _ => return Err("UDP_TRY_RECEIVE max_bytes must be a number".to_string()) };
+                        let id = match socket_val { Value::UdpSocket(id) => id, _ => return Err("UDP_TRY_RECEIVE expects UDP socket".to_string()) };
+                        let mut mgr = udp_manager_global().lock().map_err(|_| "UDP manager poisoned".to_string())?;
+                        match mgr.try_receive(id, max_bytes) {
+                            Ok(Some((data, src_addr))) => {
+                                let data_str = String::from_utf8_lossy(&data).to_string();
+                                stack.push(Value::Box(vec![Value::Str(data_str), Value::Str(src_addr)]));
+                            }
+                            Ok(None) => stack.push(Value::None),
+                            Err(e) => return Err(e)
+                        }
+                    }
+                    "udp_close" => {
+                        if *arg_count != 1 { return Err("UDP_CLOSE expects exactly 1 argument (socket)".to_string()); }
+                        let socket_val = stack.pop().expect("Expected socket for UDP_CLOSE");
+                        let id = match socket_val { Value::UdpSocket(id) => id, _ => return Err("UDP_CLOSE expects UDP socket".to_string()) };
+                        let mut mgr = udp_manager_global().lock().map_err(|_| "UDP manager poisoned".to_string())?;
+                        match mgr.close(id) { Ok(_) => stack.push(Value::Bool(true)), Err(e) => return Err(e) }
+                    }
+                    
+                    // UDP Multicast and Broadcast built-ins (top-level)
+                    "udp_join_multicast" => {
+                        if *arg_count < 2 || *arg_count > 3 { return Err("UDP_JOIN_MULTICAST expects 2-3 arguments (socket, multicast_addr, [interface_addr])".to_string()); }
+                        
+                        let interface_addr = if *arg_count >= 3 {
+                            let addr_val = stack.pop().expect("Expected interface_addr for UDP_JOIN_MULTICAST");
+                            match addr_val { Value::Str(s) => Some(s), _ => return Err("UDP_JOIN_MULTICAST interface_addr must be a string".to_string()) }
+                        } else { None };
+                        
+                        let multicast_addr_val = stack.pop().expect("Expected multicast_addr for UDP_JOIN_MULTICAST");
+                        let socket_val = stack.pop().expect("Expected socket for UDP_JOIN_MULTICAST");
+                        
+                        let multicast_addr = match multicast_addr_val { Value::Str(s) => s, _ => return Err("UDP_JOIN_MULTICAST multicast_addr must be a string".to_string()) };
+                        let socket_id = match socket_val { Value::UdpSocket(id) => id, _ => return Err("UDP_JOIN_MULTICAST socket must be a UdpSocket".to_string()) };
+                        
+                        let mut mgr = udp_manager_global().lock().map_err(|_| "UDP manager poisoned".to_string())?;
+                        mgr.join_multicast_group(socket_id, &multicast_addr, interface_addr.as_deref())?;
+                        stack.push(Value::Bool(true));
+                    }
+                    "udp_leave_multicast" => {
+                        if *arg_count < 2 || *arg_count > 3 { return Err("UDP_LEAVE_MULTICAST expects 2-3 arguments (socket, multicast_addr, [interface_addr])".to_string()); }
+                        
+                        let interface_addr = if *arg_count >= 3 {
+                            let addr_val = stack.pop().expect("Expected interface_addr for UDP_LEAVE_MULTICAST");
+                            match addr_val { Value::Str(s) => Some(s), _ => return Err("UDP_LEAVE_MULTICAST interface_addr must be a string".to_string()) }
+                        } else { None };
+                        
+                        let multicast_addr_val = stack.pop().expect("Expected multicast_addr for UDP_LEAVE_MULTICAST");
+                        let socket_val = stack.pop().expect("Expected socket for UDP_LEAVE_MULTICAST");
+                        
+                        let multicast_addr = match multicast_addr_val { Value::Str(s) => s, _ => return Err("UDP_LEAVE_MULTICAST multicast_addr must be a string".to_string()) };
+                        let socket_id = match socket_val { Value::UdpSocket(id) => id, _ => return Err("UDP_LEAVE_MULTICAST socket must be a UdpSocket".to_string()) };
+                        
+                        let mut mgr = udp_manager_global().lock().map_err(|_| "UDP manager poisoned".to_string())?;
+                        mgr.leave_multicast_group(socket_id, &multicast_addr, interface_addr.as_deref())?;
+                        stack.push(Value::Bool(true));
+                    }
+                    "udp_set_multicast_ttl" => {
+                        if *arg_count != 2 { return Err("UDP_SET_MULTICAST_TTL expects exactly 2 arguments (socket, ttl)".to_string()); }
+                        let ttl_val = stack.pop().expect("Expected ttl for UDP_SET_MULTICAST_TTL");
+                        let socket_val = stack.pop().expect("Expected socket for UDP_SET_MULTICAST_TTL");
+                        
+                        let ttl: u32 = match ttl_val { Value::Int(n) => n as u32, Value::Float(f) => f as u32, _ => return Err("UDP_SET_MULTICAST_TTL ttl must be a number".to_string()) };
+                        let socket_id = match socket_val { Value::UdpSocket(id) => id, _ => return Err("UDP_SET_MULTICAST_TTL socket must be a UdpSocket".to_string()) };
+                        
+                        let mut mgr = udp_manager_global().lock().map_err(|_| "UDP manager poisoned".to_string())?;
+                        mgr.set_multicast_ttl(socket_id, ttl)?;
+                        stack.push(Value::Bool(true));
+                    }
+                    "udp_set_multicast_loopback" => {
+                        if *arg_count != 2 { return Err("UDP_SET_MULTICAST_LOOPBACK expects exactly 2 arguments (socket, loopback)".to_string()); }
+                        let loopback_val = stack.pop().expect("Expected loopback for UDP_SET_MULTICAST_LOOPBACK");
+                        let socket_val = stack.pop().expect("Expected socket for UDP_SET_MULTICAST_LOOPBACK");
+                        
+                        let loopback = match loopback_val { Value::Bool(b) => b, _ => return Err("UDP_SET_MULTICAST_LOOPBACK loopback must be a boolean".to_string()) };
+                        let socket_id = match socket_val { Value::UdpSocket(id) => id, _ => return Err("UDP_SET_MULTICAST_LOOPBACK socket must be a UdpSocket".to_string()) };
+                        
+                        let mut mgr = udp_manager_global().lock().map_err(|_| "UDP manager poisoned".to_string())?;
+                        mgr.set_multicast_loopback(socket_id, loopback)?;
+                        stack.push(Value::Bool(true));
+                    }
+                    "udp_set_broadcast" => {
+                        if *arg_count != 2 { return Err("UDP_SET_BROADCAST expects exactly 2 arguments (socket, broadcast)".to_string()); }
+                        let broadcast_val = stack.pop().expect("Expected broadcast for UDP_SET_BROADCAST");
+                        let socket_val = stack.pop().expect("Expected socket for UDP_SET_BROADCAST");
+                        
+                        let broadcast = match broadcast_val { Value::Bool(b) => b, _ => return Err("UDP_SET_BROADCAST broadcast must be a boolean".to_string()) };
+                        let socket_id = match socket_val { Value::UdpSocket(id) => id, _ => return Err("UDP_SET_BROADCAST socket must be a UdpSocket".to_string()) };
+                        
+                        let mut mgr = udp_manager_global().lock().map_err(|_| "UDP manager poisoned".to_string())?;
+                        mgr.set_broadcast(socket_id, broadcast)?;
+                        stack.push(Value::Bool(true));
+                    }
+                    "udp_send_broadcast" => {
+                        if *arg_count != 3 { return Err("UDP_SEND_BROADCAST expects exactly 3 arguments (socket, data, port)".to_string()); }
+                        let port_val = stack.pop().expect("Expected port for UDP_SEND_BROADCAST");
+                        let data_val = stack.pop().expect("Expected data for UDP_SEND_BROADCAST");
+                        let socket_val = stack.pop().expect("Expected socket for UDP_SEND_BROADCAST");
+                        
+                        let port: u16 = match port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("UDP_SEND_BROADCAST port must be a number".to_string()) };
+                        let data = match data_val { Value::Str(s) => s.into_bytes(), _ => return Err("UDP_SEND_BROADCAST data must be a string".to_string()) };
+                        let socket_id = match socket_val { Value::UdpSocket(id) => id, _ => return Err("UDP_SEND_BROADCAST socket must be a UdpSocket".to_string()) };
+                        
+                        let mut mgr = udp_manager_global().lock().map_err(|_| "UDP manager poisoned".to_string())?;
+                        let bytes_sent = mgr.send_broadcast(socket_id, &data, port)?;
+                        stack.push(Value::Int(bytes_sent as i64));
+                    }
+                    "udp_send_multicast" => {
+                        if *arg_count != 4 { return Err("UDP_SEND_MULTICAST expects exactly 4 arguments (socket, data, multicast_addr, port)".to_string()); }
+                        let port_val = stack.pop().expect("Expected port for UDP_SEND_MULTICAST");
+                        let multicast_addr_val = stack.pop().expect("Expected multicast_addr for UDP_SEND_MULTICAST");
+                        let data_val = stack.pop().expect("Expected data for UDP_SEND_MULTICAST");
+                        let socket_val = stack.pop().expect("Expected socket for UDP_SEND_MULTICAST");
+                        
+                        let port: u16 = match port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("UDP_SEND_MULTICAST port must be a number".to_string()) };
+                        let multicast_addr = match multicast_addr_val { Value::Str(s) => s, _ => return Err("UDP_SEND_MULTICAST multicast_addr must be a string".to_string()) };
+                        let data = match data_val { Value::Str(s) => s.into_bytes(), _ => return Err("UDP_SEND_MULTICAST data must be a string".to_string()) };
+                        let socket_id = match socket_val { Value::UdpSocket(id) => id, _ => return Err("UDP_SEND_MULTICAST socket must be a UdpSocket".to_string()) };
+                        
+                        let mut mgr = udp_manager_global().lock().map_err(|_| "UDP manager poisoned".to_string())?;
+                        let bytes_sent = mgr.send_multicast(socket_id, &data, &multicast_addr, port)?;
+                        stack.push(Value::Int(bytes_sent as i64));
+                    }
+                    "udp_is_multicast" => {
+                        if *arg_count != 1 { return Err("UDP_IS_MULTICAST expects exactly 1 argument (address)".to_string()); }
+                        let addr_val = stack.pop().expect("Expected address for UDP_IS_MULTICAST");
+                        let addr = match addr_val { Value::Str(s) => s, _ => return Err("UDP_IS_MULTICAST address must be a string".to_string()) };
+                        
+                        use crate::udp_socket_manager::UdpSocketManager;
+                        let is_multicast = UdpSocketManager::is_multicast_address(&addr);
+                        stack.push(Value::Bool(is_multicast));
+                    }
+                    "udp_is_broadcast" => {
+                        if *arg_count != 1 { return Err("UDP_IS_BROADCAST expects exactly 1 argument (address)".to_string()); }
+                        let addr_val = stack.pop().expect("Expected address for UDP_IS_BROADCAST");
+                        let addr = match addr_val { Value::Str(s) => s, _ => return Err("UDP_IS_BROADCAST address must be a string".to_string()) };
+                        
+                        use crate::udp_socket_manager::UdpSocketManager;
+                        let is_broadcast = UdpSocketManager::is_broadcast_address(&addr);
+                        stack.push(Value::Bool(is_broadcast));
+                    }
+                    
+                    // TLS Network I/O built-ins (top-level)
+                    "tls_connect" => {
+                        if *arg_count != 2 { return Err("TLS_CONNECT expects exactly 2 arguments (host, port)".to_string()); }
+                        let port_val = stack.pop().expect("Expected port for TLS_CONNECT");
+                        let host_val = stack.pop().expect("Expected host for TLS_CONNECT");
+                        let host = match host_val { Value::Str(s) => s, _ => return Err("TLS_CONNECT host must be a string".to_string()) };
+                        let port: u16 = match port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("TLS_CONNECT port must be a number".to_string()) };
+                        let mut mgr = tls_manager_global().lock().map_err(|_| "TLS manager poisoned".to_string())?;
+                        match mgr.connect(&host, port) { Ok(id) => stack.push(Value::TlsConnection(id)), Err(e) => return Err(e) }
+                    }
+                    "tls_listen" => {
+                        if *arg_count != 3 { return Err("TLS_LISTEN expects exactly 3 arguments (port, cert_path, key_path)".to_string()); }
+                        let key_val = stack.pop().expect("Expected key_path for TLS_LISTEN");
+                        let cert_val = stack.pop().expect("Expected cert_path for TLS_LISTEN");
+                        let port_val = stack.pop().expect("Expected port for TLS_LISTEN");
+                        let port: u16 = match port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("TLS_LISTEN port must be a number".to_string()) };
+                        let cert_path = match cert_val { Value::Str(s) => s, _ => return Err("TLS_LISTEN cert_path must be a string".to_string()) };
+                        let key_path = match key_val { Value::Str(s) => s, _ => return Err("TLS_LISTEN key_path must be a string".to_string()) };
+                        let mut mgr = tls_manager_global().lock().map_err(|_| "TLS manager poisoned".to_string())?;
+                        match mgr.listen(port, &cert_path, &key_path) { Ok(id) => stack.push(Value::TlsListener(id)), Err(e) => return Err(e) }
+                    }
+                    "tls_accept" => {
+                        if *arg_count != 1 { return Err("TLS_ACCEPT expects exactly 1 argument (listener)".to_string()); }
+                        let listener_val = stack.pop().expect("Expected listener for TLS_ACCEPT");
+                        let id = match listener_val { Value::TlsListener(id) => id, _ => return Err("TLS_ACCEPT expects TLS listener".to_string()) };
+                        let mut mgr = tls_manager_global().lock().map_err(|_| "TLS manager poisoned".to_string())?;
+                        match mgr.accept(id) { Ok(conn_id) => stack.push(Value::TlsConnection(conn_id)), Err(e) => return Err(e) }
+                    }
+                    "tls_send" => {
+                        if *arg_count != 2 { return Err("TLS_SEND expects exactly 2 arguments (connection, data)".to_string()); }
+                        let data_val = stack.pop().expect("Expected data for TLS_SEND");
+                        let conn_val = stack.pop().expect("Expected connection for TLS_SEND");
+                        let data = match data_val { Value::Str(s) => s, _ => return Err("TLS_SEND data must be a string".to_string()) };
+                        let id = match conn_val { Value::TlsConnection(id) => id, _ => return Err("TLS_SEND expects TLS connection".to_string()) };
+                        let mut mgr = tls_manager_global().lock().map_err(|_| "TLS manager poisoned".to_string())?;
+                        match mgr.send(id, &data) { Ok(_) => stack.push(Value::Bool(true)), Err(e) => return Err(e) }
+                    }
+                    "tls_receive" => {
+                        if *arg_count != 2 { return Err("TLS_RECEIVE expects exactly 2 arguments (connection, max_bytes)".to_string()); }
+                        let max_val = stack.pop().expect("Expected max_bytes for TLS_RECEIVE");
+                        let conn_val = stack.pop().expect("Expected connection for TLS_RECEIVE");
+                        let max_bytes: usize = match max_val { Value::Int(n) => n as usize, Value::Float(f) => f as usize, _ => return Err("TLS_RECEIVE max_bytes must be a number".to_string()) };
+                        let id = match conn_val { Value::TlsConnection(id) => id, _ => return Err("TLS_RECEIVE expects TLS connection".to_string()) };
+                        let mut mgr = tls_manager_global().lock().map_err(|_| "TLS manager poisoned".to_string())?;
+                        match mgr.receive(id, max_bytes) { Ok(s) => stack.push(Value::Str(s)), Err(e) => return Err(e) }
+                    }
+                    "tls_try_receive" => {
+                        if *arg_count != 2 { return Err("TLS_TRY_RECEIVE expects exactly 2 arguments (connection, max_bytes)".to_string()); }
+                        let max_val = stack.pop().expect("Expected max_bytes for TLS_TRY_RECEIVE");
+                        let conn_val = stack.pop().expect("Expected connection for TLS_TRY_RECEIVE");
+                        let max_bytes: usize = match max_val { Value::Int(n) => n as usize, Value::Float(f) => f as usize, _ => return Err("TLS_TRY_RECEIVE max_bytes must be a number".to_string()) };
+                        let id = match conn_val { Value::TlsConnection(id) => id, _ => return Err("TLS_TRY_RECEIVE expects TLS connection".to_string()) };
+                        let mut mgr = tls_manager_global().lock().map_err(|_| "TLS manager poisoned".to_string())?;
+                        match mgr.try_receive(id, max_bytes) {
+                            Ok(Some(data)) => stack.push(Value::Str(data)),
+                            Ok(None) => stack.push(Value::None),
+                            Err(e) => return Err(e)
+                        }
+                    }
+                    "tls_close" => {
+                        if *arg_count != 1 { return Err("TLS_CLOSE expects exactly 1 argument (connection or listener)".to_string()); }
+                        let val = stack.pop().expect("Expected argument for TLS_CLOSE");
+                        let mut mgr = tls_manager_global().lock().map_err(|_| "TLS manager poisoned".to_string())?;
+                        match val {
+                            Value::TlsConnection(id) => match mgr.close_connection(id) { Ok(_) => stack.push(Value::Bool(true)), Err(e) => return Err(e) },
+                            Value::TlsListener(id) => match mgr.close_listener(id) { Ok(_) => stack.push(Value::Bool(true)), Err(e) => return Err(e) },
+                            _ => return Err("TLS_CLOSE expects TLS connection or listener".to_string()),
+                        }
+                    }
+                    
+                    // Event Loop / Async Network I/O built-ins (top-level)
+                    "event_register" => {
+                        if *arg_count != 2 { return Err("EVENT_REGISTER expects exactly 2 arguments (socket, event_types)".to_string()); }
+                        let events_val = stack.pop().expect("Expected event_types for EVENT_REGISTER");
+                        let socket_val = stack.pop().expect("Expected socket for EVENT_REGISTER");
+                        
+                        // Convert socket value to SocketType
+                        let socket_type = match socket_val {
+                            Value::TcpConnection(id) => SocketType::TcpConnection(id),
+                            Value::TcpListener(id) => SocketType::TcpListener(id),
+                            Value::UdpSocket(id) => SocketType::UdpSocket(id),
+                            Value::TlsConnection(id) => SocketType::TlsConnection(id),
+                            Value::TlsListener(id) => SocketType::TlsListener(id),
+                            Value::WebSocket(id) => SocketType::WebSocket(id),
+                            _ => return Err("EVENT_REGISTER expects a socket".to_string()),
+                        };
+                        
+                        // Convert event types (expecting a box of strings)
+                        let event_types = match events_val {
+                            Value::Box(items) => {
+                                let mut events = Vec::new();
+                                for item in items {
+                                    match item {
+                                        Value::Str(s) => {
+                                            match s.as_str() {
+                                                "read" => events.push(EventType::Read),
+                                                "write" => events.push(EventType::Write),
+                                                "accept" => events.push(EventType::Accept),
+                                                "connect" => events.push(EventType::Connect),
+                                                _ => return Err(format!("Unknown event type: {}", s)),
+                                            }
+                                        }
+                                        _ => return Err("Event types must be strings".to_string()),
+                                    }
+                                }
+                                events
+                            }
+                            Value::Str(s) => {
+                                // Single event type
+                                vec![match s.as_str() {
+                                    "read" => EventType::Read,
+                                    "write" => EventType::Write,
+                                    "accept" => EventType::Accept,
+                                    "connect" => EventType::Connect,
+                                    _ => return Err(format!("Unknown event type: {}", s)),
+                                }]
+                            }
+                            _ => return Err("Event types must be a string or box of strings".to_string()),
+                        };
+                        
+                        let mut mgr = event_loop_global().lock().map_err(|_| "Event loop manager poisoned".to_string())?;
+                        let event_id = mgr.register_socket(socket_type, event_types);
+                        stack.push(Value::Str(event_id));
+                    }
+                    "event_unregister" => {
+                        if *arg_count != 1 { return Err("EVENT_UNREGISTER expects exactly 1 argument (event_id)".to_string()); }
+                        let event_id_val = stack.pop().expect("Expected event_id for EVENT_UNREGISTER");
+                        let event_id = match event_id_val { Value::Str(s) => s, _ => return Err("EVENT_UNREGISTER event_id must be a string".to_string()) };
+                        
+                        let mut mgr = event_loop_global().lock().map_err(|_| "Event loop manager poisoned".to_string())?;
+                        match mgr.unregister_socket(&event_id) { Ok(_) => stack.push(Value::Bool(true)), Err(e) => return Err(e) }
+                    }
+                    "event_poll" => {
+                        if *arg_count != 0 { return Err("EVENT_POLL expects no arguments".to_string()); }
+                        
+                        let mut mgr = event_loop_global().lock().map_err(|_| "Event loop manager poisoned".to_string())?;
+                        let events = mgr.poll_events();
+                        
+                        // Convert events to Scraps format
+                        let mut event_boxes = Vec::new();
+                        for event in events {
+                            let socket_str = match event.socket {
+                                SocketType::TcpConnection(id) => format!("tcp_connection_{}", id),
+                                SocketType::TcpListener(id) => format!("tcp_listener_{}", id),
+                                SocketType::UdpSocket(id) => format!("udp_socket_{}", id),
+                                SocketType::TlsConnection(id) => format!("tls_connection_{}", id),
+                                SocketType::TlsListener(id) => format!("tls_listener_{}", id),
+                                SocketType::WebSocket(id) => format!("websocket_{}", id),
+                            };
+                            let event_str = match event.event_type {
+                                EventType::Read => "read",
+                                EventType::Write => "write",
+                                EventType::Accept => "accept",
+                                EventType::Connect => "connect",
+                            };
+                            event_boxes.push(Value::Box(vec![
+                                Value::Str(socket_str),
+                                Value::Str(event_str.to_string()),
+                            ]));
+                        }
+                        stack.push(Value::Box(event_boxes));
+                    }
+                    "event_wait" => {
+                        if *arg_count != 1 { return Err("EVENT_WAIT expects exactly 1 argument (timeout_ms)".to_string()); }
+                        let timeout_val = stack.pop().expect("Expected timeout_ms for EVENT_WAIT");
+                        let timeout_ms: Option<u64> = match timeout_val {
+                            Value::Int(n) if n >= 0 => Some(n as u64),
+                            Value::Float(f) if f >= 0.0 => Some(f as u64),
+                            Value::Int(-1) => None, // -1 means no timeout
+                            Value::Float(f) if f < 0.0 => None, // negative means no timeout
+                            _ => return Err("EVENT_WAIT timeout_ms must be a non-negative number or -1".to_string()),
+                        };
+                        
+                        let mut mgr = event_loop_global().lock().map_err(|_| "Event loop manager poisoned".to_string())?;
+                        let events = mgr.wait_for_events(timeout_ms);
+                        
+                        // Convert events to Scraps format (same as event_poll)
+                        let mut event_boxes = Vec::new();
+                        for event in events {
+                            let socket_str = match event.socket {
+                                SocketType::TcpConnection(id) => format!("tcp_connection_{}", id),
+                                SocketType::TcpListener(id) => format!("tcp_listener_{}", id),
+                                SocketType::UdpSocket(id) => format!("udp_socket_{}", id),
+                                SocketType::TlsConnection(id) => format!("tls_connection_{}", id),
+                                SocketType::TlsListener(id) => format!("tls_listener_{}", id),
+                                SocketType::WebSocket(id) => format!("websocket_{}", id),
+                            };
+                            let event_str = match event.event_type {
+                                EventType::Read => "read",
+                                EventType::Write => "write",
+                                EventType::Accept => "accept",
+                                EventType::Connect => "connect",
+                            };
+                            event_boxes.push(Value::Box(vec![
+                                Value::Str(socket_str),
+                                Value::Str(event_str.to_string()),
+                            ]));
+                        }
+                        stack.push(Value::Box(event_boxes));
+                    }
+                    "event_wait_any" => {
+                        if *arg_count < 1 || *arg_count > 3 { return Err("EVENT_WAIT_ANY expects 1-3 arguments (socket_types, [event_types], [timeout_ms])".to_string()); }
+                        
+                        // Get timeout (optional, last argument)
+                        let timeout_ms = if *arg_count >= 3 {
+                            let timeout_val = stack.pop().expect("Expected timeout_ms");
+                            match timeout_val {
+                                Value::Int(n) if n >= 0 => Some(n as u64),
+                                Value::Float(f) if f >= 0.0 => Some(f as u64),
+                                Value::Int(-1) => None,
+                                Value::Float(f) if f < 0.0 => None,
+                                _ => return Err("EVENT_WAIT_ANY timeout_ms must be a non-negative number or -1".to_string()),
+                            }
+                        } else { None };
+                        
+                        // Get event types (optional, middle argument)
+                        let event_types = if *arg_count >= 2 {
+                            let events_val = stack.pop().expect("Expected event_types");
+                            match events_val {
+                                Value::Box(items) => {
+                                    let mut events = Vec::new();
+                                    for item in items {
+                                        match item {
+                                            Value::Str(s) => {
+                                                match s.as_str() {
+                                                    "read" => events.push(EventType::Read),
+                                                    "write" => events.push(EventType::Write),
+                                                    "accept" => events.push(EventType::Accept),
+                                                    "connect" => events.push(EventType::Connect),
+                                                    _ => return Err(format!("Unknown event type: {}", s)),
+                                                }
+                                            }
+                                            _ => return Err("Event types must be strings".to_string()),
+                                        }
+                                    }
+                                    events
+                                }
+                                _ => Vec::new(), // Empty means all event types
+                            }
+                        } else { Vec::new() };
+                        
+                        // Get socket types (required, first argument)
+                        let socket_types_val = stack.pop().expect("Expected socket_types");
+                        let socket_types = match socket_types_val {
+                            Value::Box(items) => {
+                                let mut sockets = Vec::new();
+                                for item in items {
+                                    match item {
+                                        Value::TcpConnection(id) => sockets.push(SocketType::TcpConnection(id)),
+                                        Value::TcpListener(id) => sockets.push(SocketType::TcpListener(id)),
+                                        Value::UdpSocket(id) => sockets.push(SocketType::UdpSocket(id)),
+                                        Value::TlsConnection(id) => sockets.push(SocketType::TlsConnection(id)),
+                                        Value::TlsListener(id) => sockets.push(SocketType::TlsListener(id)),
+                                        Value::WebSocket(id) => sockets.push(SocketType::WebSocket(id)),
+                                        _ => return Err("Socket types must be socket objects".to_string()),
+                                    }
+                                }
+                                sockets
+                            }
+                            _ => Vec::new(), // Empty means all socket types
+                        };
+                        
+                        let filter = EventFilter { socket_types, event_types, timeout_ms };
+                        let mut mgr = event_loop_global().lock().map_err(|_| "Event loop manager poisoned".to_string())?;
+                        
+                        match mgr.wait_for_any(filter) {
+                            Some(event) => {
+                                let socket_str = match event.socket {
+                                    SocketType::TcpConnection(id) => format!("tcp_connection_{}", id),
+                                    SocketType::TcpListener(id) => format!("tcp_listener_{}", id),
+                                    SocketType::UdpSocket(id) => format!("udp_socket_{}", id),
+                                    SocketType::TlsConnection(id) => format!("tls_connection_{}", id),
+                                    SocketType::TlsListener(id) => format!("tls_listener_{}", id),
+                                    SocketType::WebSocket(id) => format!("websocket_{}", id),
+                                };
+                                let event_str = match event.event_type {
+                                    EventType::Read => "read",
+                                    EventType::Write => "write",
+                                    EventType::Accept => "accept",
+                                    EventType::Connect => "connect",
+                                };
+                                stack.push(Value::Box(vec![
+                                    Value::Str(socket_str),
+                                    Value::Str(event_str.to_string()),
+                                ]));
+                            }
+                            None => stack.push(Value::None),
+                        }
+                    }
+                    
+                    // Connection Pool built-ins (top-level)
+                    "pool_stats" => {
+                        if *arg_count != 3 { return Err("POOL_STATS expects exactly 3 arguments (host, port, protocol)".to_string()); }
+                        let protocol_val = stack.pop().expect("Expected protocol for POOL_STATS");
+                        let port_val = stack.pop().expect("Expected port for POOL_STATS");
+                        let host_val = stack.pop().expect("Expected host for POOL_STATS");
+                        
+                        let host = match host_val { Value::Str(s) => s, _ => return Err("POOL_STATS host must be a string".to_string()) };
+                        let port: u16 = match port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("POOL_STATS port must be a number".to_string()) };
+                        let protocol = match protocol_val { Value::Str(s) => s, _ => return Err("POOL_STATS protocol must be a string".to_string()) };
+                        
+                        let mgr = pool_manager_global().lock().map_err(|_| "Pool manager poisoned".to_string())?;
+                        let stats = mgr.get_pool_stats(&host, port, &protocol);
+                        
+                        // Return stats as a box: [pool_size, max_pool_size, total_pools]
+                        stack.push(Value::Box(vec![
+                            Value::Int(stats.pool_size as i64),
+                            Value::Int(stats.max_pool_size as i64),
+                            Value::Int(stats.total_pools as i64),
+                        ]));
+                    }
+                    "pool_clear" => {
+                        if *arg_count != 3 { return Err("POOL_CLEAR expects exactly 3 arguments (host, port, protocol)".to_string()); }
+                        let protocol_val = stack.pop().expect("Expected protocol for POOL_CLEAR");
+                        let port_val = stack.pop().expect("Expected port for POOL_CLEAR");
+                        let host_val = stack.pop().expect("Expected host for POOL_CLEAR");
+                        
+                        let host = match host_val { Value::Str(s) => s, _ => return Err("POOL_CLEAR host must be a string".to_string()) };
+                        let port: u16 = match port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("POOL_CLEAR port must be a number".to_string()) };
+                        let protocol = match protocol_val { Value::Str(s) => s, _ => return Err("POOL_CLEAR protocol must be a string".to_string()) };
+                        
+                        let mut mgr = pool_manager_global().lock().map_err(|_| "Pool manager poisoned".to_string())?;
+                        mgr.clear_pool(&host, port, &protocol);
+                        stack.push(Value::Bool(true));
+                    }
+                    "pool_configure" => {
+                        if *arg_count != 3 { return Err("POOL_CONFIGURE expects exactly 3 arguments (max_connections, max_idle_seconds, max_lifetime_seconds)".to_string()); }
+                        let lifetime_val = stack.pop().expect("Expected max_lifetime_seconds for POOL_CONFIGURE");
+                        let idle_val = stack.pop().expect("Expected max_idle_seconds for POOL_CONFIGURE");
+                        let max_val = stack.pop().expect("Expected max_connections for POOL_CONFIGURE");
+                        
+                        let max_connections: usize = match max_val { Value::Int(n) => n as usize, Value::Float(f) => f as usize, _ => return Err("POOL_CONFIGURE max_connections must be a number".to_string()) };
+                        let max_idle_seconds: u64 = match idle_val { Value::Int(n) => n as u64, Value::Float(f) => f as u64, _ => return Err("POOL_CONFIGURE max_idle_seconds must be a number".to_string()) };
+                        let max_lifetime_seconds: u64 = match lifetime_val { Value::Int(n) => n as u64, Value::Float(f) => f as u64, _ => return Err("POOL_CONFIGURE max_lifetime_seconds must be a number".to_string()) };
+                        
+                        let mut mgr = pool_manager_global().lock().map_err(|_| "Pool manager poisoned".to_string())?;
+                        mgr.configure_pool(max_connections, max_idle_seconds, max_lifetime_seconds);
+                        stack.push(Value::Bool(true));
+                    }
+                    
+                    // Timeout Management built-ins (top-level)
+                    "timeout_set_global" => {
+                        if *arg_count != 4 { return Err("TIMEOUT_SET_GLOBAL expects exactly 4 arguments (protocol, connect_ms, read_ms, write_ms)".to_string()); }
+                        let write_val = stack.pop().expect("Expected write_ms for TIMEOUT_SET_GLOBAL");
+                        let read_val = stack.pop().expect("Expected read_ms for TIMEOUT_SET_GLOBAL");
+                        let connect_val = stack.pop().expect("Expected connect_ms for TIMEOUT_SET_GLOBAL");
+                        let protocol_val = stack.pop().expect("Expected protocol for TIMEOUT_SET_GLOBAL");
+                        
+                        let protocol = match protocol_val { Value::Str(s) => s, _ => return Err("TIMEOUT_SET_GLOBAL protocol must be a string".to_string()) };
+                        let connect_ms: u64 = match connect_val { Value::Int(n) => n as u64, Value::Float(f) => f as u64, _ => return Err("TIMEOUT_SET_GLOBAL connect_ms must be a number".to_string()) };
+                        let read_ms: u64 = match read_val { Value::Int(n) => n as u64, Value::Float(f) => f as u64, _ => return Err("TIMEOUT_SET_GLOBAL read_ms must be a number".to_string()) };
+                        let write_ms: u64 = match write_val { Value::Int(n) => n as u64, Value::Float(f) => f as u64, _ => return Err("TIMEOUT_SET_GLOBAL write_ms must be a number".to_string()) };
+                        
+                        let mut mgr = timeout_manager_global().lock().map_err(|_| "Timeout manager poisoned".to_string())?;
+                        mgr.set_global_timeout(&protocol, connect_ms, read_ms, write_ms);
+                        stack.push(Value::Bool(true));
+                    }
+                    "timeout_set_specific" => {
+                        if *arg_count != 6 { return Err("TIMEOUT_SET_SPECIFIC expects exactly 6 arguments (protocol, host, port, connect_ms, read_ms, write_ms)".to_string()); }
+                        let write_val = stack.pop().expect("Expected write_ms for TIMEOUT_SET_SPECIFIC");
+                        let read_val = stack.pop().expect("Expected read_ms for TIMEOUT_SET_SPECIFIC");
+                        let connect_val = stack.pop().expect("Expected connect_ms for TIMEOUT_SET_SPECIFIC");
+                        let port_val = stack.pop().expect("Expected port for TIMEOUT_SET_SPECIFIC");
+                        let host_val = stack.pop().expect("Expected host for TIMEOUT_SET_SPECIFIC");
+                        let protocol_val = stack.pop().expect("Expected protocol for TIMEOUT_SET_SPECIFIC");
+                        
+                        let protocol = match protocol_val { Value::Str(s) => s, _ => return Err("TIMEOUT_SET_SPECIFIC protocol must be a string".to_string()) };
+                        let host = match host_val { Value::Str(s) => s, _ => return Err("TIMEOUT_SET_SPECIFIC host must be a string".to_string()) };
+                        let port: u16 = match port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("TIMEOUT_SET_SPECIFIC port must be a number".to_string()) };
+                        let connect_ms: u64 = match connect_val { Value::Int(n) => n as u64, Value::Float(f) => f as u64, _ => return Err("TIMEOUT_SET_SPECIFIC connect_ms must be a number".to_string()) };
+                        let read_ms: u64 = match read_val { Value::Int(n) => n as u64, Value::Float(f) => f as u64, _ => return Err("TIMEOUT_SET_SPECIFIC read_ms must be a number".to_string()) };
+                        let write_ms: u64 = match write_val { Value::Int(n) => n as u64, Value::Float(f) => f as u64, _ => return Err("TIMEOUT_SET_SPECIFIC write_ms must be a number".to_string()) };
+                        
+                        let mut mgr = timeout_manager_global().lock().map_err(|_| "Timeout manager poisoned".to_string())?;
+                        mgr.set_specific_timeout(&protocol, &host, port, connect_ms, read_ms, write_ms);
+                        stack.push(Value::Bool(true));
+                    }
+                    "timeout_get_info" => {
+                        if *arg_count < 1 || *arg_count > 3 { return Err("TIMEOUT_GET_INFO expects 1-3 arguments (protocol, [host], [port])".to_string()); }
+                        
+                        let (host, port) = if *arg_count >= 3 {
+                            let port_val = stack.pop().expect("Expected port for TIMEOUT_GET_INFO");
+                            let host_val = stack.pop().expect("Expected host for TIMEOUT_GET_INFO");
+                            let host = match host_val { Value::Str(s) => Some(s), _ => return Err("TIMEOUT_GET_INFO host must be a string".to_string()) };
+                            let port: u16 = match port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("TIMEOUT_GET_INFO port must be a number".to_string()) };
+                            (host, Some(port))
+                        } else if *arg_count == 2 {
+                            let host_val = stack.pop().expect("Expected host for TIMEOUT_GET_INFO");
+                            let host = match host_val { Value::Str(s) => Some(s), _ => return Err("TIMEOUT_GET_INFO host must be a string".to_string()) };
+                            (host, None)
+                        } else {
+                            (None, None)
+                        };
+                        
+                        let protocol_val = stack.pop().expect("Expected protocol for TIMEOUT_GET_INFO");
+                        let protocol = match protocol_val { Value::Str(s) => s, _ => return Err("TIMEOUT_GET_INFO protocol must be a string".to_string()) };
+                        
+                        let mgr = timeout_manager_global().lock().map_err(|_| "Timeout manager poisoned".to_string())?;
+                        let info = mgr.get_timeout_info(&protocol, host.as_deref(), port);
+                        
+                        // Return [connect_ms, read_ms, write_ms, source]
+                        stack.push(Value::Box(vec![
+                            Value::Int(info.timeouts.connect_timeout.as_millis() as i64),
+                            Value::Int(info.timeouts.read_timeout.as_millis() as i64),
+                            Value::Int(info.timeouts.write_timeout.as_millis() as i64),
+                            Value::Str(info.source),
+                        ]));
+                    }
+                    "timeout_remove" => {
+                        if *arg_count != 3 { return Err("TIMEOUT_REMOVE expects exactly 3 arguments (protocol, host, port)".to_string()); }
+                        let port_val = stack.pop().expect("Expected port for TIMEOUT_REMOVE");
+                        let host_val = stack.pop().expect("Expected host for TIMEOUT_REMOVE");
+                        let protocol_val = stack.pop().expect("Expected protocol for TIMEOUT_REMOVE");
+                        
+                        let protocol = match protocol_val { Value::Str(s) => s, _ => return Err("TIMEOUT_REMOVE protocol must be a string".to_string()) };
+                        let host = match host_val { Value::Str(s) => s, _ => return Err("TIMEOUT_REMOVE host must be a string".to_string()) };
+                        let port: u16 = match port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("TIMEOUT_REMOVE port must be a number".to_string()) };
+                        
+                        let mut mgr = timeout_manager_global().lock().map_err(|_| "Timeout manager poisoned".to_string())?;
+                        let removed = mgr.remove_specific_timeout(&protocol, &host, port);
+                        stack.push(Value::Bool(removed));
+                    }
+                    "timeout_clear" => {
+                        if *arg_count != 0 { return Err("TIMEOUT_CLEAR expects no arguments".to_string()); }
+                        let mut mgr = timeout_manager_global().lock().map_err(|_| "Timeout manager poisoned".to_string())?;
+                        mgr.clear_specific_timeouts();
+                        stack.push(Value::Bool(true));
+                    }
+                    "timeout_summary" => {
+                        if *arg_count != 0 { return Err("TIMEOUT_SUMMARY expects no arguments".to_string()); }
+                        let mgr = timeout_manager_global().lock().map_err(|_| "Timeout manager poisoned".to_string())?;
+                        let summary = mgr.get_all_timeouts();
+                        
+                        // Return [global_count, specific_count, default_connect_ms, default_read_ms, default_write_ms]
+                        stack.push(Value::Box(vec![
+                            Value::Int(summary.global_count as i64),
+                            Value::Int(summary.specific_count as i64),
+                            Value::Int(summary.default_timeouts.connect_timeout.as_millis() as i64),
+                            Value::Int(summary.default_timeouts.read_timeout.as_millis() as i64),
+                            Value::Int(summary.default_timeouts.write_timeout.as_millis() as i64),
+                        ]));
+                    }
+                    
+                    // Proxy Management built-ins (top-level)
+                    "proxy_set_global" => {
+                        if *arg_count < 4 || *arg_count > 6 { return Err("PROXY_SET_GLOBAL expects 4-6 arguments (protocol, proxy_type, host, port, [username], [password])".to_string()); }
+                        
+                        let (username, password) = if *arg_count >= 6 {
+                            let pass_val = stack.pop().expect("Expected password for PROXY_SET_GLOBAL");
+                            let user_val = stack.pop().expect("Expected username for PROXY_SET_GLOBAL");
+                            let password = match pass_val { Value::Str(s) => Some(s), _ => return Err("PROXY_SET_GLOBAL password must be a string".to_string()) };
+                            let username = match user_val { Value::Str(s) => Some(s), _ => return Err("PROXY_SET_GLOBAL username must be a string".to_string()) };
+                            (username, password)
+                        } else if *arg_count == 5 {
+                            let user_val = stack.pop().expect("Expected username for PROXY_SET_GLOBAL");
+                            let username = match user_val { Value::Str(s) => Some(s), _ => return Err("PROXY_SET_GLOBAL username must be a string".to_string()) };
+                            (username, None)
+                        } else {
+                            (None, None)
+                        };
+                        
+                        let port_val = stack.pop().expect("Expected port for PROXY_SET_GLOBAL");
+                        let host_val = stack.pop().expect("Expected host for PROXY_SET_GLOBAL");
+                        let proxy_type_val = stack.pop().expect("Expected proxy_type for PROXY_SET_GLOBAL");
+                        let protocol_val = stack.pop().expect("Expected protocol for PROXY_SET_GLOBAL");
+                        
+                        let protocol = match protocol_val { Value::Str(s) => s, _ => return Err("PROXY_SET_GLOBAL protocol must be a string".to_string()) };
+                        let proxy_type = match proxy_type_val { Value::Str(s) => s, _ => return Err("PROXY_SET_GLOBAL proxy_type must be a string".to_string()) };
+                        let host = match host_val { Value::Str(s) => s, _ => return Err("PROXY_SET_GLOBAL host must be a string".to_string()) };
+                        let port: u16 = match port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("PROXY_SET_GLOBAL port must be a number".to_string()) };
+                        
+                        let mut mgr = proxy_manager_global().lock().map_err(|_| "Proxy manager poisoned".to_string())?;
+                        match mgr.set_global_proxy(&protocol, &proxy_type, &host, port, username, password) {
+                            Ok(()) => stack.push(Value::Bool(true)),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    "proxy_set_specific" => {
+                        if *arg_count < 6 || *arg_count > 8 { return Err("PROXY_SET_SPECIFIC expects 6-8 arguments (protocol, target_host, target_port, proxy_type, proxy_host, proxy_port, [username], [password])".to_string()); }
+                        
+                        let (username, password) = if *arg_count >= 8 {
+                            let pass_val = stack.pop().expect("Expected password for PROXY_SET_SPECIFIC");
+                            let user_val = stack.pop().expect("Expected username for PROXY_SET_SPECIFIC");
+                            let password = match pass_val { Value::Str(s) => Some(s), _ => return Err("PROXY_SET_SPECIFIC password must be a string".to_string()) };
+                            let username = match user_val { Value::Str(s) => Some(s), _ => return Err("PROXY_SET_SPECIFIC username must be a string".to_string()) };
+                            (username, password)
+                        } else if *arg_count == 7 {
+                            let user_val = stack.pop().expect("Expected username for PROXY_SET_SPECIFIC");
+                            let username = match user_val { Value::Str(s) => Some(s), _ => return Err("PROXY_SET_SPECIFIC username must be a string".to_string()) };
+                            (username, None)
+                        } else {
+                            (None, None)
+                        };
+                        
+                        let proxy_port_val = stack.pop().expect("Expected proxy_port for PROXY_SET_SPECIFIC");
+                        let proxy_host_val = stack.pop().expect("Expected proxy_host for PROXY_SET_SPECIFIC");
+                        let proxy_type_val = stack.pop().expect("Expected proxy_type for PROXY_SET_SPECIFIC");
+                        let target_port_val = stack.pop().expect("Expected target_port for PROXY_SET_SPECIFIC");
+                        let target_host_val = stack.pop().expect("Expected target_host for PROXY_SET_SPECIFIC");
+                        let protocol_val = stack.pop().expect("Expected protocol for PROXY_SET_SPECIFIC");
+                        
+                        let protocol = match protocol_val { Value::Str(s) => s, _ => return Err("PROXY_SET_SPECIFIC protocol must be a string".to_string()) };
+                        let target_host = match target_host_val { Value::Str(s) => s, _ => return Err("PROXY_SET_SPECIFIC target_host must be a string".to_string()) };
+                        let target_port: u16 = match target_port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("PROXY_SET_SPECIFIC target_port must be a number".to_string()) };
+                        let proxy_type = match proxy_type_val { Value::Str(s) => s, _ => return Err("PROXY_SET_SPECIFIC proxy_type must be a string".to_string()) };
+                        let proxy_host = match proxy_host_val { Value::Str(s) => s, _ => return Err("PROXY_SET_SPECIFIC proxy_host must be a string".to_string()) };
+                        let proxy_port: u16 = match proxy_port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("PROXY_SET_SPECIFIC proxy_port must be a number".to_string()) };
+                        
+                        let mut mgr = proxy_manager_global().lock().map_err(|_| "Proxy manager poisoned".to_string())?;
+                        match mgr.set_specific_proxy(&protocol, &target_host, target_port, &proxy_type, &proxy_host, proxy_port, username, password) {
+                            Ok(()) => stack.push(Value::Bool(true)),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    "proxy_set_default" => {
+                        if *arg_count < 3 || *arg_count > 5 { return Err("PROXY_SET_DEFAULT expects 3-5 arguments (proxy_type, host, port, [username], [password])".to_string()); }
+                        
+                        let (username, password) = if *arg_count >= 5 {
+                            let pass_val = stack.pop().expect("Expected password for PROXY_SET_DEFAULT");
+                            let user_val = stack.pop().expect("Expected username for PROXY_SET_DEFAULT");
+                            let password = match pass_val { Value::Str(s) => Some(s), _ => return Err("PROXY_SET_DEFAULT password must be a string".to_string()) };
+                            let username = match user_val { Value::Str(s) => Some(s), _ => return Err("PROXY_SET_DEFAULT username must be a string".to_string()) };
+                            (username, password)
+                        } else if *arg_count == 4 {
+                            let user_val = stack.pop().expect("Expected username for PROXY_SET_DEFAULT");
+                            let username = match user_val { Value::Str(s) => Some(s), _ => return Err("PROXY_SET_DEFAULT username must be a string".to_string()) };
+                            (username, None)
+                        } else {
+                            (None, None)
+                        };
+                        
+                        let port_val = stack.pop().expect("Expected port for PROXY_SET_DEFAULT");
+                        let host_val = stack.pop().expect("Expected host for PROXY_SET_DEFAULT");
+                        let proxy_type_val = stack.pop().expect("Expected proxy_type for PROXY_SET_DEFAULT");
+                        
+                        let proxy_type = match proxy_type_val { Value::Str(s) => s, _ => return Err("PROXY_SET_DEFAULT proxy_type must be a string".to_string()) };
+                        let host = match host_val { Value::Str(s) => s, _ => return Err("PROXY_SET_DEFAULT host must be a string".to_string()) };
+                        let port: u16 = match port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("PROXY_SET_DEFAULT port must be a number".to_string()) };
+                        
+                        let mut mgr = proxy_manager_global().lock().map_err(|_| "Proxy manager poisoned".to_string())?;
+                        match mgr.set_default_proxy(&proxy_type, &host, port, username, password) {
+                            Ok(()) => stack.push(Value::Bool(true)),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    "proxy_get_info" => {
+                        if *arg_count < 1 || *arg_count > 3 { return Err("PROXY_GET_INFO expects 1-3 arguments (protocol, [target_host], [target_port])".to_string()); }
+                        
+                        let (target_host, target_port) = if *arg_count >= 3 {
+                            let port_val = stack.pop().expect("Expected target_port for PROXY_GET_INFO");
+                            let host_val = stack.pop().expect("Expected target_host for PROXY_GET_INFO");
+                            let host = match host_val { Value::Str(s) => Some(s), _ => return Err("PROXY_GET_INFO target_host must be a string".to_string()) };
+                            let port: u16 = match port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("PROXY_GET_INFO target_port must be a number".to_string()) };
+                            (host, Some(port))
+                        } else if *arg_count == 2 {
+                            let host_val = stack.pop().expect("Expected target_host for PROXY_GET_INFO");
+                            let host = match host_val { Value::Str(s) => Some(s), _ => return Err("PROXY_GET_INFO target_host must be a string".to_string()) };
+                            (host, None)
+                        } else {
+                            (None, None)
+                        };
+                        
+                        let protocol_val = stack.pop().expect("Expected protocol for PROXY_GET_INFO");
+                        let protocol = match protocol_val { Value::Str(s) => s, _ => return Err("PROXY_GET_INFO protocol must be a string".to_string()) };
+                        
+                        let mgr = proxy_manager_global().lock().map_err(|_| "Proxy manager poisoned".to_string())?;
+                        let info = mgr.get_proxy_info(&protocol, target_host.as_deref(), target_port);
+                        
+                        if let Some(config) = info.proxy_config {
+                            // Return [proxy_type, host, port, username, source]
+                            let username = config.username.unwrap_or_else(|| "".to_string());
+                            stack.push(Value::Box(vec![
+                                Value::Str(config.proxy_type.to_string()),
+                                Value::Str(config.host),
+                                Value::Int(config.port as i64),
+                                Value::Str(username),
+                                Value::Str(info.source),
+                            ]));
+                        } else {
+                            stack.push(Value::None);
+                        }
+                    }
+                    "proxy_remove_global" => {
+                        if *arg_count != 1 { return Err("PROXY_REMOVE_GLOBAL expects exactly 1 argument (protocol)".to_string()); }
+                        let protocol_val = stack.pop().expect("Expected protocol for PROXY_REMOVE_GLOBAL");
+                        let protocol = match protocol_val { Value::Str(s) => s, _ => return Err("PROXY_REMOVE_GLOBAL protocol must be a string".to_string()) };
+                        
+                        let mut mgr = proxy_manager_global().lock().map_err(|_| "Proxy manager poisoned".to_string())?;
+                        let removed = mgr.remove_global_proxy(&protocol);
+                        stack.push(Value::Bool(removed));
+                    }
+                    "proxy_remove_specific" => {
+                        if *arg_count != 3 { return Err("PROXY_REMOVE_SPECIFIC expects exactly 3 arguments (protocol, target_host, target_port)".to_string()); }
+                        let port_val = stack.pop().expect("Expected target_port for PROXY_REMOVE_SPECIFIC");
+                        let host_val = stack.pop().expect("Expected target_host for PROXY_REMOVE_SPECIFIC");
+                        let protocol_val = stack.pop().expect("Expected protocol for PROXY_REMOVE_SPECIFIC");
+                        
+                        let protocol = match protocol_val { Value::Str(s) => s, _ => return Err("PROXY_REMOVE_SPECIFIC protocol must be a string".to_string()) };
+                        let target_host = match host_val { Value::Str(s) => s, _ => return Err("PROXY_REMOVE_SPECIFIC target_host must be a string".to_string()) };
+                        let target_port: u16 = match port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("PROXY_REMOVE_SPECIFIC target_port must be a number".to_string()) };
+                        
+                        let mut mgr = proxy_manager_global().lock().map_err(|_| "Proxy manager poisoned".to_string())?;
+                        let removed = mgr.remove_specific_proxy(&protocol, &target_host, target_port);
+                        stack.push(Value::Bool(removed));
+                    }
+                    "proxy_clear_all" => {
+                        if *arg_count != 0 { return Err("PROXY_CLEAR_ALL expects no arguments".to_string()); }
+                        let mut mgr = proxy_manager_global().lock().map_err(|_| "Proxy manager poisoned".to_string())?;
+                        mgr.clear_all();
+                        stack.push(Value::Bool(true));
+                    }
+                    "proxy_add_bypass" => {
+                        if *arg_count != 1 { return Err("PROXY_ADD_BYPASS expects exactly 1 argument (host)".to_string()); }
+                        let host_val = stack.pop().expect("Expected host for PROXY_ADD_BYPASS");
+                        let host = match host_val { Value::Str(s) => s, _ => return Err("PROXY_ADD_BYPASS host must be a string".to_string()) };
+                        
+                        let mut mgr = proxy_manager_global().lock().map_err(|_| "Proxy manager poisoned".to_string())?;
+                        mgr.add_bypass(&host);
+                        stack.push(Value::Bool(true));
+                    }
+                    "proxy_remove_bypass" => {
+                        if *arg_count != 1 { return Err("PROXY_REMOVE_BYPASS expects exactly 1 argument (host)".to_string()); }
+                        let host_val = stack.pop().expect("Expected host for PROXY_REMOVE_BYPASS");
+                        let host = match host_val { Value::Str(s) => s, _ => return Err("PROXY_REMOVE_BYPASS host must be a string".to_string()) };
+                        
+                        let mut mgr = proxy_manager_global().lock().map_err(|_| "Proxy manager poisoned".to_string())?;
+                        let removed = mgr.remove_bypass(&host);
+                        stack.push(Value::Bool(removed));
+                    }
+                    "proxy_get_bypass_list" => {
+                        if *arg_count != 0 { return Err("PROXY_GET_BYPASS_LIST expects no arguments".to_string()); }
+                        let mgr = proxy_manager_global().lock().map_err(|_| "Proxy manager poisoned".to_string())?;
+                        let bypass_list = mgr.get_bypass_list();
+                        
+                        let bypass_values: Vec<Value> = bypass_list.into_iter().map(Value::Str).collect();
+                        stack.push(Value::Box(bypass_values));
+                    }
+                    "proxy_stats" => {
+                        if *arg_count != 0 { return Err("PROXY_STATS expects no arguments".to_string()); }
+                        let mgr = proxy_manager_global().lock().map_err(|_| "Proxy manager poisoned".to_string())?;
+                        let stats = mgr.get_stats();
+                        
+                        // Return [global_count, specific_count, has_default, bypass_count]
+                        stack.push(Value::Box(vec![
+                            Value::Int(stats.global_count as i64),
+                            Value::Int(stats.specific_count as i64),
+                            Value::Bool(stats.has_default),
+                            Value::Int(stats.bypass_count as i64),
+                        ]));
+                    }
+                    
+                    // Raw Socket built-ins (top-level)
+                    "raw_socket_create" => {
+                        if *arg_count != 1 { return Err("RAW_SOCKET_CREATE expects exactly 1 argument (protocol)".to_string()); }
+                        let protocol_val = stack.pop().expect("Expected protocol for RAW_SOCKET_CREATE");
+                        let protocol: u8 = match protocol_val { 
+                            Value::Int(n) => n as u8, 
+                            Value::Float(f) => f as u8, 
+                            _ => return Err("RAW_SOCKET_CREATE protocol must be a number".to_string()) 
+                        };
+                        
+                        let mut mgr = raw_manager_global().lock().map_err(|_| "Raw socket manager poisoned".to_string())?;
+                        match mgr.create_raw_socket(protocol) {
+                            Ok(id) => stack.push(Value::RawSocket(id)),
+                            Err(e) => {
+                                // Return error string instead of failing - raw sockets need root
+                                stack.push(Value::Str(format!("Error: {}", e)));
+                            }
+                        }
+                    }
+                    "raw_socket_set_header_included" => {
+                        if *arg_count != 2 { return Err("RAW_SOCKET_SET_HEADER_INCLUDED expects exactly 2 arguments (socket, included)".to_string()); }
+                        let included_val = stack.pop().expect("Expected included for RAW_SOCKET_SET_HEADER_INCLUDED");
+                        let socket_val = stack.pop().expect("Expected socket for RAW_SOCKET_SET_HEADER_INCLUDED");
+                        
+                        let included = match included_val { Value::Bool(b) => b, _ => return Err("RAW_SOCKET_SET_HEADER_INCLUDED included must be a boolean".to_string()) };
+                        let socket_id = match socket_val { Value::RawSocket(id) => id, _ => return Err("RAW_SOCKET_SET_HEADER_INCLUDED socket must be a RawSocket".to_string()) };
+                        
+                        let mut mgr = raw_manager_global().lock().map_err(|_| "Raw socket manager poisoned".to_string())?;
+                        match mgr.set_header_included(socket_id, included) {
+                            Ok(()) => stack.push(Value::Bool(true)),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    "raw_socket_send" => {
+                        if *arg_count != 3 { return Err("RAW_SOCKET_SEND expects exactly 3 arguments (socket, data, target)".to_string()); }
+                        let target_val = stack.pop().expect("Expected target for RAW_SOCKET_SEND");
+                        let data_val = stack.pop().expect("Expected data for RAW_SOCKET_SEND");
+                        let socket_val = stack.pop().expect("Expected socket for RAW_SOCKET_SEND");
+                        
+                        let target = match target_val { Value::Str(s) => s, _ => return Err("RAW_SOCKET_SEND target must be a string".to_string()) };
+                        let data = match data_val { Value::Str(s) => s.into_bytes(), _ => return Err("RAW_SOCKET_SEND data must be a string".to_string()) };
+                        let socket_id = match socket_val { Value::RawSocket(id) => id, _ => return Err("RAW_SOCKET_SEND socket must be a RawSocket".to_string()) };
+                        
+                        let mut mgr = raw_manager_global().lock().map_err(|_| "Raw socket manager poisoned".to_string())?;
+                        match mgr.send_raw(socket_id, &data, &target) {
+                            Ok(bytes_sent) => stack.push(Value::Int(bytes_sent as i64)),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    "raw_socket_receive" => {
+                        if *arg_count != 2 { return Err("RAW_SOCKET_RECEIVE expects exactly 2 arguments (socket, max_bytes)".to_string()); }
+                        let max_bytes_val = stack.pop().expect("Expected max_bytes for RAW_SOCKET_RECEIVE");
+                        let socket_val = stack.pop().expect("Expected socket for RAW_SOCKET_RECEIVE");
+                        
+                        let max_bytes: usize = match max_bytes_val { 
+                            Value::Int(n) => n as usize, 
+                            Value::Float(f) => f as usize, 
+                            _ => return Err("RAW_SOCKET_RECEIVE max_bytes must be a number".to_string()) 
+                        };
+                        let socket_id = match socket_val { Value::RawSocket(id) => id, _ => return Err("RAW_SOCKET_RECEIVE socket must be a RawSocket".to_string()) };
+                        
+                        let mut mgr = raw_manager_global().lock().map_err(|_| "Raw socket manager poisoned".to_string())?;
+                        match mgr.receive_raw(socket_id, max_bytes) {
+                            Ok((data, source)) => {
+                                let data_str = String::from_utf8_lossy(&data).to_string();
+                                stack.push(Value::Box(vec![Value::Str(data_str), Value::Str(source)]));
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    "raw_socket_close" => {
+                        if *arg_count != 1 { return Err("RAW_SOCKET_CLOSE expects exactly 1 argument (socket)".to_string()); }
+                        let socket_val = stack.pop().expect("Expected socket for RAW_SOCKET_CLOSE");
+                        let socket_id = match socket_val { Value::RawSocket(id) => id, _ => return Err("RAW_SOCKET_CLOSE socket must be a RawSocket".to_string()) };
+                        
+                        let mut mgr = raw_manager_global().lock().map_err(|_| "Raw socket manager poisoned".to_string())?;
+                        match mgr.close_raw(socket_id) {
+                            Ok(()) => stack.push(Value::Bool(true)),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    "raw_socket_info" => {
+                        if *arg_count != 1 { return Err("RAW_SOCKET_INFO expects exactly 1 argument (socket)".to_string()); }
+                        let socket_val = stack.pop().expect("Expected socket for RAW_SOCKET_INFO");
+                        let socket_id = match socket_val { Value::RawSocket(id) => id, _ => return Err("RAW_SOCKET_INFO socket must be a RawSocket".to_string()) };
+                        
+                        let mgr = raw_manager_global().lock().map_err(|_| "Raw socket manager poisoned".to_string())?;
+                        if let Some((protocol, header_included)) = mgr.get_socket_info(socket_id) {
+                            stack.push(Value::Box(vec![
+                                Value::Int(protocol.to_u8() as i64),
+                                Value::Str(protocol.name()),
+                                Value::Bool(header_included),
+                            ]));
+                        } else {
+                            return Err("Raw socket not found".to_string());
+                        }
+                    }
+                    "packet_build_icmp_echo" => {
+                        if *arg_count != 3 { return Err("PACKET_BUILD_ICMP_ECHO expects exactly 3 arguments (id, sequence, data)".to_string()); }
+                        let data_val = stack.pop().expect("Expected data for PACKET_BUILD_ICMP_ECHO");
+                        let sequence_val = stack.pop().expect("Expected sequence for PACKET_BUILD_ICMP_ECHO");
+                        let id_val = stack.pop().expect("Expected id for PACKET_BUILD_ICMP_ECHO");
+                        
+                        let data = match data_val { Value::Str(s) => s.into_bytes(), _ => return Err("PACKET_BUILD_ICMP_ECHO data must be a string".to_string()) };
+                        let sequence: u16 = match sequence_val { 
+                            Value::Int(n) => n as u16, 
+                            Value::Float(f) => f as u16, 
+                            _ => return Err("PACKET_BUILD_ICMP_ECHO sequence must be a number".to_string()) 
+                        };
+                        let id: u16 = match id_val { 
+                            Value::Int(n) => n as u16, 
+                            Value::Float(f) => f as u16, 
+                            _ => return Err("PACKET_BUILD_ICMP_ECHO id must be a number".to_string()) 
+                        };
+                        
+                        use crate::raw_socket_manager::PacketBuilder;
+                        let packet = PacketBuilder::icmp_echo_request(id, sequence, &data);
+                        let packet_str = String::from_utf8_lossy(&packet).to_string();
+                        stack.push(Value::Str(packet_str));
+                    }
+                    "packet_build_ipv4_header" => {
+                        if *arg_count != 4 { return Err("PACKET_BUILD_IPV4_HEADER expects exactly 4 arguments (source, dest, protocol, data_len)".to_string()); }
+                        let data_len_val = stack.pop().expect("Expected data_len for PACKET_BUILD_IPV4_HEADER");
+                        let protocol_val = stack.pop().expect("Expected protocol for PACKET_BUILD_IPV4_HEADER");
+                        let dest_val = stack.pop().expect("Expected dest for PACKET_BUILD_IPV4_HEADER");
+                        let source_val = stack.pop().expect("Expected source for PACKET_BUILD_IPV4_HEADER");
+                        
+                        let data_len: u16 = match data_len_val { 
+                            Value::Int(n) => n as u16, 
+                            Value::Float(f) => f as u16, 
+                            _ => return Err("PACKET_BUILD_IPV4_HEADER data_len must be a number".to_string()) 
+                        };
+                        let protocol: u8 = match protocol_val { 
+                            Value::Int(n) => n as u8, 
+                            Value::Float(f) => f as u8, 
+                            _ => return Err("PACKET_BUILD_IPV4_HEADER protocol must be a number".to_string()) 
+                        };
+                        let dest = match dest_val { Value::Str(s) => s, _ => return Err("PACKET_BUILD_IPV4_HEADER dest must be a string".to_string()) };
+                        let source = match source_val { Value::Str(s) => s, _ => return Err("PACKET_BUILD_IPV4_HEADER source must be a string".to_string()) };
+                        
+                        use crate::raw_socket_manager::PacketBuilder;
+                        match PacketBuilder::ipv4_header(&source, &dest, protocol, data_len) {
+                            Ok(header) => {
+                                let header_str = String::from_utf8_lossy(&header).to_string();
+                                stack.push(Value::Str(header_str));
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    "packet_calculate_checksum" => {
+                        if *arg_count != 1 { return Err("PACKET_CALCULATE_CHECKSUM expects exactly 1 argument (data)".to_string()); }
+                        let data_val = stack.pop().expect("Expected data for PACKET_CALCULATE_CHECKSUM");
+                        let data = match data_val { Value::Str(s) => s.into_bytes(), _ => return Err("PACKET_CALCULATE_CHECKSUM data must be a string".to_string()) };
+                        
+                        use crate::raw_socket_manager::PacketBuilder;
+                        let checksum = PacketBuilder::calculate_checksum(&data);
+                        stack.push(Value::Int(checksum as i64));
+                    }
+                    
+                    // Network Interface built-ins (top-level)
+                    "get_interfaces" => {
+                        if *arg_count != 0 { return Err("GET_INTERFACES expects no arguments".to_string()); }
+                        let mut mgr = interface_manager_global().lock().map_err(|_| "Interface manager poisoned".to_string())?;
+                        match mgr.enumerate_interfaces() {
+                            Ok(interface_names) => {
+                                let interface_values: Vec<Value> = interface_names.into_iter().map(Value::Str).collect();
+                                stack.push(Value::Box(interface_values));
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    "get_interface_info" => {
+                        if *arg_count != 1 { return Err("GET_INTERFACE_INFO expects exactly 1 argument (interface_name)".to_string()); }
+                        let name_val = stack.pop().expect("Expected interface_name for GET_INTERFACE_INFO");
+                        let name = match name_val { Value::Str(s) => s, _ => return Err("GET_INTERFACE_INFO interface_name must be a string".to_string()) };
+                        
+                        let mgr = interface_manager_global().lock().map_err(|_| "Interface manager poisoned".to_string())?;
+                        if let Some(interface) = mgr.get_interface(&name) {
+                            let mut addresses = Vec::new();
+                            for addr in &interface.addresses {
+                                let mut addr_info = Vec::new();
+                                addr_info.push(Value::Str(addr.ip.to_string()));
+                                addr_info.push(Value::Str(addr.netmask.to_string()));
+                                if let Some(broadcast) = &addr.broadcast {
+                                    addr_info.push(Value::Str(broadcast.to_string()));
+                                } else {
+                                    addr_info.push(Value::Str("None".to_string()));
+                                }
+                                addresses.push(Value::Box(addr_info));
+                            }
+                            
+                            stack.push(Value::Box(vec![
+                                Value::Str(interface.name.clone()),
+                                Value::Str(interface.interface_type.to_string()),
+                                Value::Bool(interface.is_up),
+                                Value::Bool(interface.is_loopback),
+                                Value::Bool(interface.is_multicast),
+                                Value::Int(interface.mtu as i64),
+                                Value::Box(addresses),
+                                Value::Str(interface.mac_address.clone().unwrap_or_else(|| "Unknown".to_string())),
+                            ]));
+                        } else {
+                            return Err(format!("Interface '{}' not found", name));
+                        }
+                    }
+                    "get_interface_stats" => {
+                        if *arg_count != 1 { return Err("GET_INTERFACE_STATS expects exactly 1 argument (interface_name)".to_string()); }
+                        let name_val = stack.pop().expect("Expected interface_name for GET_INTERFACE_STATS");
+                        let name = match name_val { Value::Str(s) => s, _ => return Err("GET_INTERFACE_STATS interface_name must be a string".to_string()) };
+                        
+                        let mgr = interface_manager_global().lock().map_err(|_| "Interface manager poisoned".to_string())?;
+                        if let Some(stats) = mgr.get_interface_stats(&name) {
+                            stack.push(Value::Box(vec![
+                                Value::Str(stats.name),
+                                Value::Bool(stats.is_up),
+                                Value::Int(stats.mtu as i64),
+                                Value::Int(stats.address_count as i64),
+                                Value::Bool(stats.has_ipv4),
+                                Value::Bool(stats.has_ipv6),
+                            ]));
+                        } else {
+                            return Err(format!("Interface '{}' not found", name));
+                        }
+                    }
+                    "get_primary_interface" => {
+                        if *arg_count != 0 { return Err("GET_PRIMARY_INTERFACE expects no arguments".to_string()); }
+                        let mgr = interface_manager_global().lock().map_err(|_| "Interface manager poisoned".to_string())?;
+                        if let Some(interface) = mgr.get_primary_interface() {
+                            stack.push(Value::Str(interface.name.clone()));
+                        } else {
+                            stack.push(Value::None);
+                        }
+                    }
+                    "get_loopback_interface" => {
+                        if *arg_count != 0 { return Err("GET_LOOPBACK_INTERFACE expects no arguments".to_string()); }
+                        let mgr = interface_manager_global().lock().map_err(|_| "Interface manager poisoned".to_string())?;
+                        if let Some(interface) = mgr.get_loopback_interface() {
+                            stack.push(Value::Str(interface.name.clone()));
+                        } else {
+                            stack.push(Value::None);
+                        }
+                    }
+                    "get_interfaces_by_type" => {
+                        if *arg_count != 1 { return Err("GET_INTERFACES_BY_TYPE expects exactly 1 argument (type)".to_string()); }
+                        let type_val = stack.pop().expect("Expected type for GET_INTERFACES_BY_TYPE");
+                        let type_str = match type_val { Value::Str(s) => s, _ => return Err("GET_INTERFACES_BY_TYPE type must be a string".to_string()) };
+                        
+                        use crate::network_interface_manager::InterfaceType;
+                        let interface_type = match type_str.to_lowercase().as_str() {
+                            "ethernet" => InterfaceType::Ethernet,
+                            "wireless" => InterfaceType::Wireless,
+                            "loopback" => InterfaceType::Loopback,
+                            "tunnel" => InterfaceType::Tunnel,
+                            "virtual" => InterfaceType::Virtual,
+                            "unknown" => InterfaceType::Unknown,
+                            _ => return Err("GET_INTERFACES_BY_TYPE type must be one of: ethernet, wireless, loopback, tunnel, virtual, unknown".to_string()),
+                        };
+                        
+                        let mgr = interface_manager_global().lock().map_err(|_| "Interface manager poisoned".to_string())?;
+                        let interfaces = mgr.get_interfaces_by_type(interface_type);
+                        let interface_names: Vec<Value> = interfaces.into_iter().map(|iface| Value::Str(iface.name.clone())).collect();
+                        stack.push(Value::Box(interface_names));
+                    }
+                    "get_up_interfaces" => {
+                        if *arg_count != 0 { return Err("GET_UP_INTERFACES expects no arguments".to_string()); }
+                        let mgr = interface_manager_global().lock().map_err(|_| "Interface manager poisoned".to_string())?;
+                        let interfaces = mgr.get_up_interfaces();
+                        let interface_names: Vec<Value> = interfaces.into_iter().map(|iface| Value::Str(iface.name.clone())).collect();
+                        stack.push(Value::Box(interface_names));
+                    }
+                    "get_interface_by_ip" => {
+                        if *arg_count != 1 { return Err("GET_INTERFACE_BY_IP expects exactly 1 argument (ip_address)".to_string()); }
+                        let ip_val = stack.pop().expect("Expected ip_address for GET_INTERFACE_BY_IP");
+                        let ip_str = match ip_val { Value::Str(s) => s, _ => return Err("GET_INTERFACE_BY_IP ip_address must be a string".to_string()) };
+                        
+                        let target_ip: std::net::IpAddr = ip_str.parse()
+                            .map_err(|_| format!("Invalid IP address: {}", ip_str))?;
+                        
+                        let mgr = interface_manager_global().lock().map_err(|_| "Interface manager poisoned".to_string())?;
+                        let all_interfaces: Vec<_> = mgr.interfaces.values().collect();
+                        if let Some(interface) = get_interface_by_ip(&all_interfaces, target_ip) {
+                            stack.push(Value::Str(interface.name.clone()));
+                        } else {
+                            stack.push(Value::None);
+                        }
+                    }
+                    "get_best_interface" => {
+                        if *arg_count != 1 { return Err("GET_BEST_INTERFACE expects exactly 1 argument (prefer_ipv4)".to_string()); }
+                        let prefer_ipv4_val = stack.pop().expect("Expected prefer_ipv4 for GET_BEST_INTERFACE");
+                        let prefer_ipv4 = match prefer_ipv4_val { Value::Bool(b) => b, _ => return Err("GET_BEST_INTERFACE prefer_ipv4 must be a boolean".to_string()) };
+                        
+                        let mgr = interface_manager_global().lock().map_err(|_| "Interface manager poisoned".to_string())?;
+                        let all_interfaces: Vec<_> = mgr.interfaces.values().collect();
+                        if let Some(interface) = get_best_interface_for_binding(&all_interfaces, prefer_ipv4) {
+                            stack.push(Value::Str(interface.name.clone()));
+                        } else {
+                            stack.push(Value::None);
+                        }
+                    }
+                    
+                    // IPv6 and Dual-Stack built-ins (top-level)
+                    "ipv6_set_dual_stack_mode" => {
+                        if *arg_count != 1 { return Err("IPV6_SET_DUAL_STACK_MODE expects exactly 1 argument (mode)".to_string()); }
+                        let mode_val = stack.pop().expect("Expected mode for IPV6_SET_DUAL_STACK_MODE");
+                        let mode_str = match mode_val { Value::Str(s) => s, _ => return Err("IPV6_SET_DUAL_STACK_MODE mode must be a string".to_string()) };
+                        
+                        let mode = DualStackMode::from_string(&mode_str)
+                            .map_err(|e| e)?;
+                        
+                        let mut mgr = ipv6_manager_global().lock().map_err(|_| "IPv6 manager poisoned".to_string())?;
+                        mgr.set_dual_stack_mode(mode);
+                        stack.push(Value::Bool(true));
+                    }
+                    "ipv6_get_dual_stack_mode" => {
+                        if *arg_count != 0 { return Err("IPV6_GET_DUAL_STACK_MODE expects no arguments".to_string()); }
+                        let mgr = ipv6_manager_global().lock().map_err(|_| "IPv6 manager poisoned".to_string())?;
+                        let mode = mgr.get_dual_stack_mode();
+                        stack.push(Value::Str(mode.to_string()));
+                    }
+                    "ipv6_resolve_dual_stack" => {
+                        if *arg_count != 1 { return Err("IPV6_RESOLVE_DUAL_STACK expects exactly 1 argument (hostname)".to_string()); }
+                        let hostname_val = stack.pop().expect("Expected hostname for IPV6_RESOLVE_DUAL_STACK");
+                        let hostname = match hostname_val { Value::Str(s) => s, _ => return Err("IPV6_RESOLVE_DUAL_STACK hostname must be a string".to_string()) };
+                        
+                        let mgr = ipv6_manager_global().lock().map_err(|_| "IPv6 manager poisoned".to_string())?;
+                        match mgr.resolve_dual_stack(&hostname) {
+                            Ok(result) => {
+                                let mut addresses = Vec::new();
+                                if let Some(ipv4) = result.ipv4_address {
+                                    addresses.push(Value::Str(ipv4.to_string()));
+                                } else {
+                                    addresses.push(Value::None);
+                                }
+                                if let Some(ipv6) = result.ipv6_address {
+                                    addresses.push(Value::Str(ipv6.to_string()));
+                                } else {
+                                    addresses.push(Value::None);
+                                }
+                                
+                                stack.push(Value::Box(vec![
+                                    Value::Box(addresses),
+                                    Value::Str(result.preferred_address.to_string()),
+                                    Value::Str(result.preferred_family),
+                                ]));
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    "ipv6_parse_address" => {
+                        if *arg_count != 1 { return Err("IPV6_PARSE_ADDRESS expects exactly 1 argument (address)".to_string()); }
+                        let addr_val = stack.pop().expect("Expected address for IPV6_PARSE_ADDRESS");
+                        let addr_str = match addr_val { Value::Str(s) => s, _ => return Err("IPV6_PARSE_ADDRESS address must be a string".to_string()) };
+                        
+                        let mgr = ipv6_manager_global().lock().map_err(|_| "IPv6 manager poisoned".to_string())?;
+                        match mgr.parse_ipv6_address(&addr_str) {
+                            Ok(ipv6_addr) => {
+                                stack.push(Value::Box(vec![
+                                    Value::Str(ipv6_addr.to_string()),
+                                    Value::Int(ipv6_addr.scope_id.unwrap_or(0) as i64),
+                                    Value::Bool(ipv6_addr.is_link_local),
+                                    Value::Bool(ipv6_addr.is_site_local),
+                                    Value::Bool(ipv6_addr.is_unique_local),
+                                    Value::Bool(ipv6_addr.is_multicast),
+                                    Value::Bool(ipv6_addr.is_loopback),
+                                    Value::Bool(ipv6_addr.is_unspecified),
+                                    Value::Bool(ipv6_addr.is_global()),
+                                ]));
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    "ipv6_get_multicast_address" => {
+                        if *arg_count != 1 { return Err("IPV6_GET_MULTICAST_ADDRESS expects exactly 1 argument (group)".to_string()); }
+                        let group_val = stack.pop().expect("Expected group for IPV6_GET_MULTICAST_ADDRESS");
+                        let group = match group_val { Value::Str(s) => s, _ => return Err("IPV6_GET_MULTICAST_ADDRESS group must be a string".to_string()) };
+                        
+                        let mgr = ipv6_manager_global().lock().map_err(|_| "IPv6 manager poisoned".to_string())?;
+                        match mgr.get_ipv6_multicast_address(&group) {
+                            Ok(ipv6_addr) => {
+                                stack.push(Value::Box(vec![
+                                    Value::Str(ipv6_addr.to_string()),
+                                    Value::Int(ipv6_addr.scope_id.unwrap_or(0) as i64),
+                                    Value::Bool(ipv6_addr.is_multicast),
+                                ]));
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    "ipv6_is_ipv6_address" => {
+                        if *arg_count != 1 { return Err("IPV6_IS_IPV6_ADDRESS expects exactly 1 argument (address)".to_string()); }
+                        let addr_val = stack.pop().expect("Expected address for IPV6_IS_IPV6_ADDRESS");
+                        let addr_str = match addr_val { Value::Str(s) => s, _ => return Err("IPV6_IS_IPV6_ADDRESS address must be a string".to_string()) };
+                        
+                        let mgr = ipv6_manager_global().lock().map_err(|_| "IPv6 manager poisoned".to_string())?;
+                        let is_ipv6 = mgr.is_ipv6_address(&addr_str);
+                        stack.push(Value::Bool(is_ipv6));
+                    }
+                    "ipv6_is_ipv4_address" => {
+                        if *arg_count != 1 { return Err("IPV6_IS_IPV4_ADDRESS expects exactly 1 argument (address)".to_string()); }
+                        let addr_val = stack.pop().expect("Expected address for IPV6_IS_IPV4_ADDRESS");
+                        let addr_str = match addr_val { Value::Str(s) => s, _ => return Err("IPV6_IS_IPV4_ADDRESS address must be a string".to_string()) };
+                        
+                        let mgr = ipv6_manager_global().lock().map_err(|_| "IPv6 manager poisoned".to_string())?;
+                        let is_ipv4 = mgr.is_ipv4_address(&addr_str);
+                        stack.push(Value::Bool(is_ipv4));
+                    }
+                    "ipv6_get_address_info" => {
+                        if *arg_count != 1 { return Err("IPV6_GET_ADDRESS_INFO expects exactly 1 argument (address)".to_string()); }
+                        let addr_val = stack.pop().expect("Expected address for IPV6_GET_ADDRESS_INFO");
+                        let addr_str = match addr_val { Value::Str(s) => s, _ => return Err("IPV6_GET_ADDRESS_INFO address must be a string".to_string()) };
+                        
+                        let mgr = ipv6_manager_global().lock().map_err(|_| "IPv6 manager poisoned".to_string())?;
+                        match mgr.get_ipv6_info(&addr_str) {
+                            Ok(ipv6_addr) => {
+                                stack.push(Value::Box(vec![
+                                    Value::Str(ipv6_addr.to_string()),
+                                    Value::Int(ipv6_addr.scope_id.unwrap_or(0) as i64),
+                                    Value::Bool(ipv6_addr.is_link_local),
+                                    Value::Bool(ipv6_addr.is_site_local),
+                                    Value::Bool(ipv6_addr.is_unique_local),
+                                    Value::Bool(ipv6_addr.is_multicast),
+                                    Value::Bool(ipv6_addr.is_loopback),
+                                    Value::Bool(ipv6_addr.is_unspecified),
+                                    Value::Bool(ipv6_addr.is_global()),
+                                ]));
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    "ipv6_get_config" => {
+                        if *arg_count != 0 { return Err("IPV6_GET_CONFIG expects no arguments".to_string()); }
+                        let mgr = ipv6_manager_global().lock().map_err(|_| "IPv6 manager poisoned".to_string())?;
+                        let (mode, ipv4_enabled, ipv6_enabled) = mgr.get_config();
+                        stack.push(Value::Box(vec![
+                            Value::Str(mode),
+                            Value::Bool(ipv4_enabled),
+                            Value::Bool(ipv6_enabled),
+                        ]));
+                    }
+                    "ipv6_create_dual_stack_socket" => {
+                        if *arg_count != 3 { return Err("IPV6_CREATE_DUAL_STACK_SOCKET expects exactly 3 arguments (host, port, prefer_ipv6)".to_string()); }
+                        let prefer_ipv6_val = stack.pop().expect("Expected prefer_ipv6 for IPV6_CREATE_DUAL_STACK_SOCKET");
+                        let port_val = stack.pop().expect("Expected port for IPV6_CREATE_DUAL_STACK_SOCKET");
+                        let host_val = stack.pop().expect("Expected host for IPV6_CREATE_DUAL_STACK_SOCKET");
+                        
+                        let host = match host_val { Value::Str(s) => s, _ => return Err("IPV6_CREATE_DUAL_STACK_SOCKET host must be a string".to_string()) };
+                        let port = match port_val { Value::Int(n) => n as u16, Value::Float(f) => f as u16, _ => return Err("IPV6_CREATE_DUAL_STACK_SOCKET port must be a number".to_string()) };
+                        let prefer_ipv6 = match prefer_ipv6_val { Value::Bool(b) => b, _ => return Err("IPV6_CREATE_DUAL_STACK_SOCKET prefer_ipv6 must be a boolean".to_string()) };
+                        
+                        match create_dual_stack_socket_addr(&host, port, prefer_ipv6) {
+                            Ok(socket_addr) => {
+                                stack.push(Value::Box(vec![
+                                    Value::Str(socket_addr.to_string()),
+                                    Value::Str(if socket_addr.is_ipv4() { "IPv4".to_string() } else { "IPv6".to_string() }),
+                                    Value::Int(port as i64),
+                                ]));
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    
                     // Math built-ins (top-level)
                     "abs" => { if *arg_count != 1 { return Err("ABS expects 1 argument".to_string()); } let x = stack.pop().unwrap(); let v = match x { Value::Int(n) => (n as f64).abs(), Value::Float(f)=> f.abs(), _=> return Err("ABS: type".to_string())}; stack.push(Value::Float(v)); }
                     "sign" => { if *arg_count != 1 { return Err("SIGN expects 1 argument".to_string()); } let x = stack.pop().unwrap(); let f = match x { Value::Int(n)=> n as f64, Value::Float(f)=> f, _=> return Err("SIGN: type".to_string())}; let s = if f>0.0 {1.0} else if f<0.0 {-1.0} else {0.0}; stack.push(Value::Float(s)); }
@@ -2088,7 +4475,7 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                 }
             }
             
-            OpCode::TcpSend(max_bytes) => {
+            OpCode::TcpSend(_max_bytes) => {
                 let data = stack.pop().expect("Expected data to send");
                 let connection = stack.pop().expect("Expected connection");
                 
@@ -2145,10 +4532,10 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                 }
             }
             
-            OpCode::TcpAccept(listener_id) => {
+            OpCode::TcpAccept(_listener_id) => {
                 let listener = stack.pop().expect("Expected listener");
                 
-                let id = match listener {
+                let _id = match listener {
                     Value::TcpListener(id) => id,
                     _ => return Err("TCP_ACCEPT expects TCP listener".to_string()),
                 };

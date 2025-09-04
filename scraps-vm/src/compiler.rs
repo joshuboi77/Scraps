@@ -142,11 +142,11 @@ impl Compiler {
             
             Stmt::Place { pairs, target } => {
                 // Load target box
-                self.compile_expression(target);
+                self.compile_expression(target.clone());
                 
                 // For each (index, value) pair
                 for (index, value) in pairs {
-                    self.compile_expression(index.clone());
+                    // Don't put index on stack - it's passed as OpCode parameter
                     self.compile_expression(value);
                     // TODO: Implement Place with dynamic index
                     // For now, assume index is constant
@@ -156,6 +156,14 @@ impl Compiler {
                         // TODO: Handle dynamic indices
                         panic!("Dynamic indices not yet implemented");
                     }
+                }
+                
+                // Store the updated box back to the variable
+                if let Expr::Variable(name) = target {
+                    self.program.push(OpCode::StoreVar(name));
+                } else {
+                    // TODO: Handle non-variable targets
+                    panic!("Place target must be a variable for now");
                 }
             }
             

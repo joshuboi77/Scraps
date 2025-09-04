@@ -31,9 +31,9 @@ Enable Scraps to communicate over networks, building web applications, APIs, dis
 - **DNS Resolution** - Convert domain names to IP addresses
 
 #### **3. Data Serialization**
-- **JSON Encoding/Decoding** - Web API data format
-- **Base64 Encoding** - Binary data transmission
-- **URL Encoding** - Web-safe character encoding
+- **JSON Encoding/Decoding** - Web API data format (Implemented via built-ins `json_encode`/`json_decode`)
+- **Base64 Encoding** - Binary data transmission (Implemented via `base64_encode`/`base64_decode`)
+- **URL Encoding** - Web-safe character encoding (Implemented via `url_encode`/`url_decode`)
 - **Binary Protocols** - Custom network protocols
 
 ### **📝 Syntax Design Considerations:**
@@ -69,15 +69,17 @@ CLOSE(connection)
 - Connection state management — Implemented (open/close), listener accept — Implemented
 - Tests — Added echo client/server sanity test
 
-#### **Phase 2: HTTP Protocol**
-- HTTP GET/POST requests
-- Response parsing and handling
-- Header management
+#### **Phase 2: HTTP Protocol** (complete)
+- HTTP GET/POST/PUT/DELETE — Implemented via built-ins `http_get`, `http_post`, `http_put`, `http_delete`
+- Response parsing and handling — Implemented (returns `[status, headers, body]`)
+- Header management — Implemented (pass headers as a box of pairs)
+- Tests — Added `test/http_test.scraps`
+ - Serialization helpers — Implemented JSON + Base64 + URL encoding
 
-#### **Phase 3: Advanced Protocols**
-- WebSocket support
-- HTTPS with SSL/TLS
-- Custom protocol support
+#### **Phase 3: Advanced Protocols** (in progress)
+- WebSocket client built-ins — Implemented (`ws_connect`, `ws_send`, `ws_receive`, `ws_close`)
+- HTTPS with SSL/TLS — Covered by Phase 2 HTTP (ureq)
+- Custom protocol support — Not started
 
 ---
 

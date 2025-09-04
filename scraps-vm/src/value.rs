@@ -14,6 +14,11 @@ pub enum Value {
     None,
     TcpConnection(usize),
     TcpListener(usize),
+    WebSocket(usize),
+    UdpSocket(usize),
+    TlsConnection(usize),
+    TlsListener(usize),
+    RawSocket(usize),
 }
 
 impl Value {
@@ -40,6 +45,11 @@ impl Value {
             Value::None => "None".to_string(),
             Value::TcpConnection(id) => format!("TcpConnection({})", id),
             Value::TcpListener(id) => format!("TcpListener({})", id),
+            Value::WebSocket(id) => format!("WebSocket({})", id),
+            Value::UdpSocket(id) => format!("UdpSocket({})", id),
+            Value::TlsConnection(id) => format!("TlsConnection({})", id),
+            Value::TlsListener(id) => format!("TlsListener({})", id),
+            Value::RawSocket(id) => format!("RawSocket({})", id),
         }
     }
 }

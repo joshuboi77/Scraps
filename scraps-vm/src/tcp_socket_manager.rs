@@ -20,6 +20,26 @@ impl TcpSocketManager {
         }
     }
     
+    pub fn try_receive(&mut self, connection_id: usize, max_bytes: usize) -> Result<Option<Vec<u8>>, String> {
+        if let Some(stream) = self.get_connection(connection_id) {
+            let _ = stream.set_nonblocking(true);
+            let mut buffer = vec![0; max_bytes];
+            let res = match stream.read(&mut buffer) {
+                Ok(bytes_read) => {
+                    buffer.truncate(bytes_read);
+                    Some(buffer)
+                }
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::WouldBlock { None } else { return Err(format!("Failed to try-receive: {}", e)); }
+                }
+            };
+            let _ = stream.set_nonblocking(false);
+            Ok(res)
+        } else {
+            Err("Connection not found".to_string())
+        }
+    }
+
     pub fn create_connection(&mut self, stream: TcpStream) -> usize {
         let id = self.next_connection_id;
         self.next_connection_id += 1;

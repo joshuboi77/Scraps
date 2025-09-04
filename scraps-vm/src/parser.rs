@@ -352,6 +352,7 @@ impl Parser {
                     
                     _ => {
                         debug!("DEBUG: Identifier '{}' not a keyword, checking if assignment", name);
+                        
                         // Check if it's an assignment
                         if self.peek_next().kind == TokenKind::Equal {
                             debug!("DEBUG: It's an assignment");
@@ -360,7 +361,18 @@ impl Parser {
                             debug!("DEBUG: It's an expression statement");
                             // Expression statement
                             let expr = self.expression()?;
-                            Ok(Stmt::Expression(expr))
+                            
+                            // Check if there's a -> after the expression (for arrow assignments)
+                            if self.match_token(TokenKind::ArrowRight) {
+                                debug!("DEBUG: Found -> after expression, converting to assignment");
+                                let target = self.expect(TokenKind::Identifier, "Expected target variable after '->'")?.lexeme.clone();
+                                Ok(Stmt::Assignment {
+                                    name: target,
+                                    value: expr,
+                                })
+                            } else {
+                                Ok(Stmt::Expression(expr))
+                            }
                         }
                     }
                 }
@@ -784,7 +796,12 @@ impl Parser {
                                     };
                                     continue;
                                 }
-                                _ => {}
+                                _ => {
+                                    // General case: any function call with -> should create an assignment
+                                    // This is handled at the statement level, not expression level
+                                    // So we break here and let the statement parser handle it
+                                    break;
+                                }
                             }
                         }
                     }
@@ -1447,4 +1464,5 @@ impl Parser {
     fn previous(&self) -> &Token {
         &self.tokens[self.current - 1]
     }
+    
 }

@@ -5,6 +5,16 @@ mod compiler;
 mod lexer;
 mod parser;
 mod tcp_socket_manager;
+mod websocket_manager;
+mod udp_socket_manager;
+mod tls_socket_manager;
+mod event_loop_manager;
+mod connection_pool_manager;
+mod timeout_manager;
+mod proxy_manager;
+mod raw_socket_manager;
+mod network_interface_manager;
+mod ipv6_manager;
 
 use compiler::Compiler;
 use lexer::Lexer;
