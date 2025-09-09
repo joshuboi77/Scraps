@@ -1004,6 +1004,242 @@ fn execute_function(
                         local_stack.push(Value::Bool(success));
                     }
                     
+                    // Character classification functions
+                    "is_digit" => {
+                        if *arg_count != 1 { return Err("IS_DIGIT expects exactly 1 argument (char)".to_string()); }
+                        let char_val = local_stack.pop().expect("Expected char for IS_DIGIT");
+                        
+                        let result = match char_val {
+                            Value::Str(s) => {
+                                if s.len() == 1 {
+                                    s.chars().next().unwrap().is_ascii_digit()
+                                } else {
+                                    return Err("IS_DIGIT requires a single character string".to_string());
+                                }
+                            }
+                            _ => return Err("IS_DIGIT argument must be a string".to_string())
+                        };
+                        
+                        local_stack.push(Value::Bool(result));
+                    }
+                    "is_alpha" => {
+                        if *arg_count != 1 { return Err("IS_ALPHA expects exactly 1 argument (char)".to_string()); }
+                        let char_val = local_stack.pop().expect("Expected char for IS_ALPHA");
+                        
+                        let result = match char_val {
+                            Value::Str(s) => {
+                                if s.len() == 1 {
+                                    s.chars().next().unwrap().is_ascii_alphabetic()
+                                } else {
+                                    return Err("IS_ALPHA requires a single character string".to_string());
+                                }
+                            }
+                            _ => return Err("IS_ALPHA argument must be a string".to_string())
+                        };
+                        
+                        local_stack.push(Value::Bool(result));
+                    }
+                    "is_space" => {
+                        if *arg_count != 1 { return Err("IS_SPACE expects exactly 1 argument (char)".to_string()); }
+                        let char_val = local_stack.pop().expect("Expected char for IS_SPACE");
+                        
+                        let result = match char_val {
+                            Value::Str(s) => {
+                                if s.len() == 1 {
+                                    s.chars().next().unwrap().is_ascii_whitespace()
+                                } else {
+                                    return Err("IS_SPACE requires a single character string".to_string());
+                                }
+                            }
+                            _ => return Err("IS_SPACE argument must be a string".to_string())
+                        };
+                        
+                        local_stack.push(Value::Bool(result));
+                    }
+                    "is_alnum" => {
+                        if *arg_count != 1 { return Err("IS_ALNUM expects exactly 1 argument (char)".to_string()); }
+                        let char_val = local_stack.pop().expect("Expected char for IS_ALNUM");
+                        
+                        let result = match char_val {
+                            Value::Str(s) => {
+                                if s.len() == 1 {
+                                    s.chars().next().unwrap().is_ascii_alphanumeric()
+                                } else {
+                                    return Err("IS_ALNUM requires a single character string".to_string());
+                                }
+                            }
+                            _ => return Err("IS_ALNUM argument must be a string".to_string())
+                        };
+                        
+                        local_stack.push(Value::Bool(result));
+                    }
+                    "char_code" => {
+                        if *arg_count != 1 { return Err("CHAR_CODE expects exactly 1 argument (char)".to_string()); }
+                        let char_val = local_stack.pop().expect("Expected char for CHAR_CODE");
+                        
+                        let result = match char_val {
+                            Value::Str(s) => {
+                                if s.len() == 1 {
+                                    s.chars().next().unwrap() as u32 as i64
+                                } else {
+                                    return Err("CHAR_CODE requires a single character string".to_string());
+                                }
+                            }
+                            _ => return Err("CHAR_CODE argument must be a string".to_string())
+                        };
+                        
+                        local_stack.push(Value::Int(result));
+                    }
+                    "char_from_code" => {
+                        if *arg_count != 1 { return Err("CHAR_FROM_CODE expects exactly 1 argument (code)".to_string()); }
+                        let code_val = local_stack.pop().expect("Expected code for CHAR_FROM_CODE");
+                        
+                        let result = match code_val {
+                            Value::Int(code) => {
+                                if code >= 0 && code <= 127 {
+                                    let ch = code as u8 as char;
+                                    ch.to_string()
+                                } else {
+                                    return Err("CHAR_FROM_CODE requires ASCII code 0-127".to_string());
+                                }
+                            }
+                            _ => return Err("CHAR_FROM_CODE argument must be an integer".to_string())
+                        };
+                        
+                        local_stack.push(Value::Str(result));
+                    }
+                    
+                    // Number parsing functions
+                    "parse_int" => {
+                        if *arg_count != 1 { return Err("PARSE_INT expects exactly 1 argument (string)".to_string()); }
+                        let string_val = local_stack.pop().expect("Expected string for PARSE_INT");
+                        
+                        let result = match string_val {
+                            Value::Str(s) => {
+                                match s.trim().parse::<i64>() {
+                                    Ok(n) => n,
+                                    Err(_) => return Err(format!("PARSE_INT: '{}' is not a valid integer", s))
+                                }
+                            }
+                            _ => return Err("PARSE_INT argument must be a string".to_string())
+                        };
+                        
+                        local_stack.push(Value::Int(result));
+                    }
+                    "parse_float" => {
+                        if *arg_count != 1 { return Err("PARSE_FLOAT expects exactly 1 argument (string)".to_string()); }
+                        let string_val = local_stack.pop().expect("Expected string for PARSE_FLOAT");
+                        
+                        let result = match string_val {
+                            Value::Str(s) => {
+                                match s.trim().parse::<f64>() {
+                                    Ok(f) => f,
+                                    Err(_) => return Err(format!("PARSE_FLOAT: '{}' is not a valid float", s))
+                                }
+                            }
+                            _ => return Err("PARSE_FLOAT argument must be a string".to_string())
+                        };
+                        
+                        local_stack.push(Value::Float(result));
+                    }
+                    
+                    // String manipulation functions
+                    "to_upper" => {
+                        if *arg_count != 1 { return Err("TO_UPPER expects exactly 1 argument (string)".to_string()); }
+                        let string_val = local_stack.pop().expect("Expected string for TO_UPPER");
+                        
+                        let result = match string_val {
+                            Value::Str(s) => s.to_uppercase(),
+                            _ => return Err("TO_UPPER argument must be a string".to_string())
+                        };
+                        
+                        local_stack.push(Value::Str(result));
+                    }
+                    "to_lower" => {
+                        if *arg_count != 1 { return Err("TO_LOWER expects exactly 1 argument (string)".to_string()); }
+                        let string_val = local_stack.pop().expect("Expected string for TO_LOWER");
+                        
+                        let result = match string_val {
+                            Value::Str(s) => s.to_lowercase(),
+                            _ => return Err("TO_LOWER argument must be a string".to_string())
+                        };
+                        
+                        local_stack.push(Value::Str(result));
+                    }
+                    "substring" => {
+                        if *arg_count != 3 { return Err("SUBSTRING expects exactly 3 arguments (string, start, end)".to_string()); }
+                        let end_val = local_stack.pop().expect("Expected end for SUBSTRING");
+                        let start_val = local_stack.pop().expect("Expected start for SUBSTRING");
+                        let string_val = local_stack.pop().expect("Expected string for SUBSTRING");
+                        
+                        let result = match (string_val, start_val, end_val) {
+                            (Value::Str(s), Value::Int(start), Value::Int(end)) => {
+                                if start < 0 || end < 0 {
+                                    return Err("SUBSTRING indices must be non-negative".to_string());
+                                }
+                                let start_idx = start as usize;
+                                let end_idx = end as usize;
+                                let chars: Vec<char> = s.chars().collect();
+                                
+                                if start_idx > chars.len() {
+                                    return Err(format!("SUBSTRING start index {} out of bounds (string length {})", start_idx, chars.len()));
+                                }
+                                if end_idx > chars.len() {
+                                    return Err(format!("SUBSTRING end index {} out of bounds (string length {})", end_idx, chars.len()));
+                                }
+                                if start_idx > end_idx {
+                                    return Err("SUBSTRING start index must be <= end index".to_string());
+                                }
+                                
+                                chars[start_idx..end_idx].iter().collect::<String>()
+                            }
+                            _ => return Err("SUBSTRING requires string, int, int arguments".to_string())
+                        };
+                        
+                        local_stack.push(Value::Str(result));
+                    }
+                    "index_of" => {
+                        if *arg_count != 2 { return Err("INDEX_OF expects exactly 2 arguments (string, substring)".to_string()); }
+                        let substring_val = local_stack.pop().expect("Expected substring for INDEX_OF");
+                        let string_val = local_stack.pop().expect("Expected string for INDEX_OF");
+                        
+                        let result = match (string_val, substring_val) {
+                            (Value::Str(s), Value::Str(sub)) => {
+                                match s.find(&sub) {
+                                    Some(index) => index as i64,
+                                    None => -1
+                                }
+                            }
+                            _ => return Err("INDEX_OF requires two string arguments".to_string())
+                        };
+                        
+                        local_stack.push(Value::Int(result));
+                    }
+                    "starts_with" => {
+                        if *arg_count != 2 { return Err("STARTS_WITH expects exactly 2 arguments (string, prefix)".to_string()); }
+                        let prefix_val = local_stack.pop().expect("Expected prefix for STARTS_WITH");
+                        let string_val = local_stack.pop().expect("Expected string for STARTS_WITH");
+                        
+                        let result = match (string_val, prefix_val) {
+                            (Value::Str(s), Value::Str(prefix)) => s.starts_with(&prefix),
+                            _ => return Err("STARTS_WITH requires two string arguments".to_string())
+                        };
+                        
+                        local_stack.push(Value::Bool(result));
+                    }
+                    "ends_with" => {
+                        if *arg_count != 2 { return Err("ENDS_WITH expects exactly 2 arguments (string, suffix)".to_string()); }
+                        let suffix_val = local_stack.pop().expect("Expected suffix for ENDS_WITH");
+                        let string_val = local_stack.pop().expect("Expected string for ENDS_WITH");
+                        
+                        let result = match (string_val, suffix_val) {
+                            (Value::Str(s), Value::Str(suffix)) => s.ends_with(&suffix),
+                            _ => return Err("ENDS_WITH requires two string arguments".to_string())
+                        };
+                        
+                        local_stack.push(Value::Bool(result));
+                    }
+                    
                     // TCP Network I/O Functions
                     "tcp_connect" => {
                         if *arg_count != 2 { return Err("TCP_CONNECT expects exactly 2 arguments (host, port)".to_string()); }
@@ -1754,6 +1990,96 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
     });
     env.insert("int_enable".to_string(), Value::Function {
         name: "int_enable".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    
+    // Character classification functions
+    env.insert("is_digit".to_string(), Value::Function {
+        name: "is_digit".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("is_alpha".to_string(), Value::Function {
+        name: "is_alpha".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("is_space".to_string(), Value::Function {
+        name: "is_space".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("is_alnum".to_string(), Value::Function {
+        name: "is_alnum".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("char_code".to_string(), Value::Function {
+        name: "char_code".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("char_from_code".to_string(), Value::Function {
+        name: "char_from_code".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    
+    // Number parsing functions
+    env.insert("parse_int".to_string(), Value::Function {
+        name: "parse_int".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("parse_float".to_string(), Value::Function {
+        name: "parse_float".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    
+    // String manipulation functions
+    env.insert("to_upper".to_string(), Value::Function {
+        name: "to_upper".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("to_lower".to_string(), Value::Function {
+        name: "to_lower".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("substring".to_string(), Value::Function {
+        name: "substring".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("index_of".to_string(), Value::Function {
+        name: "index_of".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("starts_with".to_string(), Value::Function {
+        name: "starts_with".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("ends_with".to_string(), Value::Function {
+        name: "ends_with".to_string(),
         params: vec![],
         body: vec![],
         rewire_target: None,
@@ -3143,6 +3469,243 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                         
                         stack.push(Value::Bool(success));
                     }
+                    
+                    // Character classification functions (top-level)
+                    "is_digit" => {
+                        if *arg_count != 1 { return Err("IS_DIGIT expects exactly 1 argument (char)".to_string()); }
+                        let char_val = stack.pop().expect("Expected char for IS_DIGIT");
+                        
+                        let result = match char_val {
+                            Value::Str(s) => {
+                                if s.len() == 1 {
+                                    s.chars().next().unwrap().is_ascii_digit()
+                                } else {
+                                    return Err("IS_DIGIT requires a single character string".to_string());
+                                }
+                            }
+                            _ => return Err("IS_DIGIT argument must be a string".to_string())
+                        };
+                        
+                        stack.push(Value::Bool(result));
+                    }
+                    "is_alpha" => {
+                        if *arg_count != 1 { return Err("IS_ALPHA expects exactly 1 argument (char)".to_string()); }
+                        let char_val = stack.pop().expect("Expected char for IS_ALPHA");
+                        
+                        let result = match char_val {
+                            Value::Str(s) => {
+                                if s.len() == 1 {
+                                    s.chars().next().unwrap().is_ascii_alphabetic()
+                                } else {
+                                    return Err("IS_ALPHA requires a single character string".to_string());
+                                }
+                            }
+                            _ => return Err("IS_ALPHA argument must be a string".to_string())
+                        };
+                        
+                        stack.push(Value::Bool(result));
+                    }
+                    "is_space" => {
+                        if *arg_count != 1 { return Err("IS_SPACE expects exactly 1 argument (char)".to_string()); }
+                        let char_val = stack.pop().expect("Expected char for IS_SPACE");
+                        
+                        let result = match char_val {
+                            Value::Str(s) => {
+                                if s.len() == 1 {
+                                    s.chars().next().unwrap().is_ascii_whitespace()
+                                } else {
+                                    return Err("IS_SPACE requires a single character string".to_string());
+                                }
+                            }
+                            _ => return Err("IS_SPACE argument must be a string".to_string())
+                        };
+                        
+                        stack.push(Value::Bool(result));
+                    }
+                    "is_alnum" => {
+                        if *arg_count != 1 { return Err("IS_ALNUM expects exactly 1 argument (char)".to_string()); }
+                        let char_val = stack.pop().expect("Expected char for IS_ALNUM");
+                        
+                        let result = match char_val {
+                            Value::Str(s) => {
+                                if s.len() == 1 {
+                                    s.chars().next().unwrap().is_ascii_alphanumeric()
+                                } else {
+                                    return Err("IS_ALNUM requires a single character string".to_string());
+                                }
+                            }
+                            _ => return Err("IS_ALNUM argument must be a string".to_string())
+                        };
+                        
+                        stack.push(Value::Bool(result));
+                    }
+                    "char_code" => {
+                        if *arg_count != 1 { return Err("CHAR_CODE expects exactly 1 argument (char)".to_string()); }
+                        let char_val = stack.pop().expect("Expected char for CHAR_CODE");
+                        
+                        let result = match char_val {
+                            Value::Str(s) => {
+                                if s.len() == 1 {
+                                    s.chars().next().unwrap() as u32 as i64
+                                } else {
+                                    return Err("CHAR_CODE requires a single character string".to_string());
+                                }
+                            }
+                            _ => return Err("CHAR_CODE argument must be a string".to_string())
+                        };
+                        
+                        stack.push(Value::Int(result));
+                    }
+                    "char_from_code" => {
+                        if *arg_count != 1 { return Err("CHAR_FROM_CODE expects exactly 1 argument (code)".to_string()); }
+                        let code_val = stack.pop().expect("Expected code for CHAR_FROM_CODE");
+                        
+                        let result = match code_val {
+                            Value::Int(code) => {
+                                if code >= 0 && code <= 127 {
+                                    let ch = code as u8 as char;
+                                    ch.to_string()
+                                } else {
+                                    return Err("CHAR_FROM_CODE requires ASCII code 0-127".to_string());
+                                }
+                            }
+                            _ => return Err("CHAR_FROM_CODE argument must be an integer".to_string())
+                        };
+                        
+                        stack.push(Value::Str(result));
+                    }
+                    
+                    // Number parsing functions (top-level)
+                    "parse_int" => {
+                        if *arg_count != 1 { return Err("PARSE_INT expects exactly 1 argument (string)".to_string()); }
+                        let string_val = stack.pop().expect("Expected string for PARSE_INT");
+                        
+                        let result = match string_val {
+                            Value::Str(s) => {
+                                match s.trim().parse::<i64>() {
+                                    Ok(n) => n,
+                                    Err(_) => return Err(format!("PARSE_INT: '{}' is not a valid integer", s))
+                                }
+                            }
+                            _ => return Err("PARSE_INT argument must be a string".to_string())
+                        };
+                        
+                        stack.push(Value::Int(result));
+                    }
+                    "parse_float" => {
+                        if *arg_count != 1 { return Err("PARSE_FLOAT expects exactly 1 argument (string)".to_string()); }
+                        let string_val = stack.pop().expect("Expected string for PARSE_FLOAT");
+                        
+                        let result = match string_val {
+                            Value::Str(s) => {
+                                match s.trim().parse::<f64>() {
+                                    Ok(f) => f,
+                                    Err(_) => return Err(format!("PARSE_FLOAT: '{}' is not a valid float", s))
+                                }
+                            }
+                            _ => return Err("PARSE_FLOAT argument must be a string".to_string())
+                        };
+                        
+                        stack.push(Value::Float(result));
+                    }
+                    
+                    // String manipulation functions (top-level)
+                    "to_upper" => {
+                        if *arg_count != 1 { return Err("TO_UPPER expects exactly 1 argument (string)".to_string()); }
+                        let string_val = stack.pop().expect("Expected string for TO_UPPER");
+                        
+                        let result = match string_val {
+                            Value::Str(s) => s.to_uppercase(),
+                            _ => return Err("TO_UPPER argument must be a string".to_string())
+                        };
+                        
+                        stack.push(Value::Str(result));
+                    }
+                    "to_lower" => {
+                        if *arg_count != 1 { return Err("TO_LOWER expects exactly 1 argument (string)".to_string()); }
+                        let string_val = stack.pop().expect("Expected string for TO_LOWER");
+                        
+                        let result = match string_val {
+                            Value::Str(s) => s.to_lowercase(),
+                            _ => return Err("TO_LOWER argument must be a string".to_string())
+                        };
+                        
+                        stack.push(Value::Str(result));
+                    }
+                    "substring" => {
+                        if *arg_count != 3 { return Err("SUBSTRING expects exactly 3 arguments (string, start, end)".to_string()); }
+                        let end_val = stack.pop().expect("Expected end for SUBSTRING");
+                        let start_val = stack.pop().expect("Expected start for SUBSTRING");
+                        let string_val = stack.pop().expect("Expected string for SUBSTRING");
+                        
+                        let result = match (string_val, start_val, end_val) {
+                            (Value::Str(s), Value::Int(start), Value::Int(end)) => {
+                                if start < 0 || end < 0 {
+                                    return Err("SUBSTRING indices must be non-negative".to_string());
+                                }
+                                let start_idx = start as usize;
+                                let end_idx = end as usize;
+                                let chars: Vec<char> = s.chars().collect();
+                                
+                                if start_idx > chars.len() {
+                                    return Err(format!("SUBSTRING start index {} out of bounds (string length {})", start_idx, chars.len()));
+                                }
+                                if end_idx > chars.len() {
+                                    return Err(format!("SUBSTRING end index {} out of bounds (string length {})", end_idx, chars.len()));
+                                }
+                                if start_idx > end_idx {
+                                    return Err("SUBSTRING start index must be <= end index".to_string());
+                                }
+                                
+                                chars[start_idx..end_idx].iter().collect::<String>()
+                            }
+                            _ => return Err("SUBSTRING requires string, int, int arguments".to_string())
+                        };
+                        
+                        stack.push(Value::Str(result));
+                    }
+                    "index_of" => {
+                        if *arg_count != 2 { return Err("INDEX_OF expects exactly 2 arguments (string, substring)".to_string()); }
+                        let substring_val = stack.pop().expect("Expected substring for INDEX_OF");
+                        let string_val = stack.pop().expect("Expected string for INDEX_OF");
+                        
+                        let result = match (string_val, substring_val) {
+                            (Value::Str(s), Value::Str(sub)) => {
+                                match s.find(&sub) {
+                                    Some(index) => index as i64,
+                                    None => -1
+                                }
+                            }
+                            _ => return Err("INDEX_OF requires two string arguments".to_string())
+                        };
+                        
+                        stack.push(Value::Int(result));
+                    }
+                    "starts_with" => {
+                        if *arg_count != 2 { return Err("STARTS_WITH expects exactly 2 arguments (string, prefix)".to_string()); }
+                        let prefix_val = stack.pop().expect("Expected prefix for STARTS_WITH");
+                        let string_val = stack.pop().expect("Expected string for STARTS_WITH");
+                        
+                        let result = match (string_val, prefix_val) {
+                            (Value::Str(s), Value::Str(prefix)) => s.starts_with(&prefix),
+                            _ => return Err("STARTS_WITH requires two string arguments".to_string())
+                        };
+                        
+                        stack.push(Value::Bool(result));
+                    }
+                    "ends_with" => {
+                        if *arg_count != 2 { return Err("ENDS_WITH expects exactly 2 arguments (string, suffix)".to_string()); }
+                        let suffix_val = stack.pop().expect("Expected suffix for ENDS_WITH");
+                        let string_val = stack.pop().expect("Expected string for ENDS_WITH");
+                        
+                        let result = match (string_val, suffix_val) {
+                            (Value::Str(s), Value::Str(suffix)) => s.ends_with(&suffix),
+                            _ => return Err("ENDS_WITH requires two string arguments".to_string())
+                        };
+                        
+                        stack.push(Value::Bool(result));
+                    }
+                    
                     // TCP Network I/O built-ins (top-level)
                     "tcp_connect" => {
                         if *arg_count != 2 { return Err("TCP_CONNECT expects exactly 2 arguments (host, port)".to_string()); }

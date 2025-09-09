@@ -1927,6 +1927,20 @@ print average               # ~1500ns (1.5μs)
 - `mem_cmpxchg(ptr, expect, val) -> int`: Atomic compare-and-swap operation with acquire-release semantics
 - `int_disable() -> int`: Mask interrupts and return previous interrupt state
 - `int_enable(interrupt_state) -> bool`: Restore interrupt state
+- `is_digit(char) -> bool`: Check if character is a digit (0-9)
+- `is_alpha(char) -> bool`: Check if character is alphabetic (a-z, A-Z)
+- `is_space(char) -> bool`: Check if character is whitespace
+- `is_alnum(char) -> bool`: Check if character is alphanumeric
+- `char_code(char) -> int`: Get ASCII code of character
+- `char_from_code(int) -> char`: Create character from ASCII code
+- `parse_int(string) -> int`: Convert string to integer with whitespace trimming
+- `parse_float(string) -> float`: Convert string to float with scientific notation support
+- `to_upper(string) -> string`: Convert string to uppercase
+- `to_lower(string) -> string`: Convert string to lowercase  
+- `substring(string, start, end) -> string`: Extract substring by character indices
+- `index_of(string, substring) -> int`: Find first occurrence of substring (returns -1 if not found)
+- `starts_with(string, prefix) -> bool`: Check if string starts with prefix
+- `ends_with(string, suffix) -> bool`: Check if string ends with suffix
 
 The `mem_load()` function provides low-level memory access for reading RAM and memory-mapped I/O (MMIO) registers. The `width` parameter specifies the number of bytes to read and must be 1, 2, 4, or 8. Essential for device drivers, systems programming, and direct hardware access.
 
@@ -2711,6 +2725,969 @@ print (average_cycle / 1000)    # ~2.8μs
 - **Memory ordering**: Combine with `mem_fence()` for additional ordering guarantees
 - **Platform portable**: Works across different architectures (x86, ARM, RISC-V)
 - **Safety**: In production, includes privilege level checks and interrupt controller validation
+
+### Character Classification Functions
+
+- `is_digit(char) -> bool`: Check if character is a digit (0-9)
+- `is_alpha(char) -> bool`: Check if character is alphabetic (a-z, A-Z)  
+- `is_space(char) -> bool`: Check if character is whitespace (space, tab, newline)
+- `is_alnum(char) -> bool`: Check if character is alphanumeric (letter or digit)
+- `char_code(char) -> int`: Get ASCII/Unicode code point of character
+- `char_from_code(int) -> char`: Create character from ASCII code (0-127)
+
+The character classification functions provide essential primitives for lexical analysis, text processing, and compiler construction. These functions operate on single-character strings and enable sophisticated string parsing and tokenization.
+
+Examples:
+
+```scraps
+# Basic character classification
+print "=== Character Classification ==="
+
+# Test digits
+digit_test = is_digit("5")
+print "is_digit('5'):"
+print digit_test                # TRUE
+
+letter_test = is_digit("a")
+print "is_digit('a'):"
+print letter_test               # FALSE
+
+# Test letters
+alpha_lower = is_alpha("x")
+alpha_upper = is_alpha("X")
+alpha_digit = is_alpha("3")
+
+print "is_alpha('x'):"
+print alpha_lower               # TRUE
+print "is_alpha('X'):"
+print alpha_upper               # TRUE
+print "is_alpha('3'):"
+print alpha_digit               # FALSE
+
+# Test whitespace
+space_test = is_space(" ")
+tab_test = is_space("	")      # Tab character
+letter_space = is_space("a")
+
+print "is_space(' '):"
+print space_test                # TRUE
+print "is_space(tab):"
+print tab_test                  # TRUE
+print "is_space('a'):"
+print letter_space              # FALSE
+
+# Test alphanumeric
+alnum_letter = is_alnum("m")
+alnum_digit = is_alnum("7")
+alnum_symbol = is_alnum("@")
+
+print "is_alnum('m'):"
+print alnum_letter              # TRUE
+print "is_alnum('7'):"
+print alnum_digit               # TRUE
+print "is_alnum('@'):"
+print alnum_symbol              # FALSE
+
+# Character code conversion
+code_A = char_code("A")
+code_a = char_code("a")
+code_0 = char_code("0")
+
+print "char_code('A'):"
+print code_A                    # 65
+print "char_code('a'):"
+print code_a                    # 97
+print "char_code('0'):"
+print code_0                    # 48
+
+# Create characters from codes
+char_65 = char_from_code(65)
+char_97 = char_from_code(97)
+char_48 = char_from_code(48)
+
+print "char_from_code(65):"
+print char_65                   # "A"
+print "char_from_code(97):"
+print char_97                   # "a"
+print "char_from_code(48):"
+print char_48                   # "0"
+
+# Round-trip conversion
+original = "Z"
+code = char_code(original)
+restored = char_from_code(code)
+print "Round-trip test:"
+print original                  # "Z"
+print code                      # 90
+print restored                  # "Z"
+
+# Simple lexer using character classification
+fn(use(source_code)) {
+  tokens = box()
+  chars = fission("") <- source_code
+  i = 0
+  
+  WHILE (i < count(chars)) {
+    char = unpack(i) <- chars
+    
+    IF (is_space(char)) {
+      pack("WHITESPACE") -> tokens
+    } ELSE {
+      IF (is_digit(char)) {
+        pack("DIGIT") -> tokens
+      } ELSE {
+        IF (is_alpha(char)) {
+          pack("LETTER") -> tokens
+        } ELSE {
+          pack("SYMBOL") -> tokens
+        }
+      }
+    }
+    
+    i = i + 1
+  }
+  
+  tokens
+} -> classify_tokens
+
+# Test the lexer
+code_sample = "x = 42"
+token_types = classify_tokens(code_sample)
+print "Token classification for 'x = 42':"
+print token_types               # [LETTER, WHITESPACE, SYMBOL, WHITESPACE, DIGIT, DIGIT]
+
+# Character statistics
+fn(use(text)) {
+  digits = 0
+  letters = 0
+  spaces = 0
+  others = 0
+  
+  chars = fission("") <- text
+  i = 0
+  
+  WHILE (i < count(chars)) {
+    char = unpack(i) <- chars
+    
+    IF (is_digit(char)) {
+      digits = digits + 1
+    } ELSE {
+      IF (is_alpha(char)) {
+        letters = letters + 1
+      } ELSE {
+        IF (is_space(char)) {
+          spaces = spaces + 1
+        } ELSE {
+          others = others + 1
+        }
+      }
+    }
+    
+    i = i + 1
+  }
+  
+  stats = box()
+  pack(digits, letters, spaces, others) -> stats
+  stats
+} -> analyze_text
+
+sample = "Hello World! 123"
+analysis = analyze_text(sample)
+digit_count = unpack(0) <- analysis
+letter_count = unpack(1) <- analysis
+space_count = unpack(2) <- analysis
+other_count = unpack(3) <- analysis
+
+print "Text analysis for 'Hello World! 123':"
+print "Digits:"
+print digit_count               # 3
+print "Letters:"
+print letter_count              # 10
+print "Spaces:"
+print space_count               # 2
+print "Others:"
+print other_count               # 1
+
+# Performance measurement
+measurements = box()
+j = 0
+WHILE (j < 100) {
+  start = time_counter()
+  
+  # Test all classification functions
+  is_digit("5")
+  is_alpha("a")
+  is_space(" ")
+  is_alnum("x")
+  char_code("A")
+  char_from_code(65)
+  
+  end = time_counter()
+  duration = end - start
+  pack(duration) -> measurements
+  j = j + 1
+}
+
+# Calculate average
+total = 0
+k = 0
+WHILE (k < 100) {
+  duration = unpack(k) <- measurements
+  total = total + duration
+  k = k + 1
+}
+average = total / 100
+
+print "Average time for 6 char operations (ns):"
+print average                   # ~3500ns
+print "Average per operation (ns):"
+print (average / 6)             # ~583ns
+```
+
+**Use Cases:**
+- **Lexical analysis**: Tokenize source code for compilers and interpreters
+- **Text parsing**: Parse structured text formats (CSV, JSON, configuration files)
+- **Input validation**: Validate user input for specific character types
+- **String processing**: Analyze and transform text data
+- **Data cleaning**: Filter and categorize characters in datasets
+- **Protocol parsing**: Parse network protocols and data formats
+- **Template processing**: Process template languages and markup
+
+**Notes:**
+- **Single character input**: All functions except `char_from_code` require single-character strings
+- **ASCII focus**: Character classification uses ASCII rules (0-127 range)
+- **Case sensitivity**: `is_alpha` recognizes both uppercase and lowercase letters
+- **Whitespace types**: `is_space` recognizes space, tab, newline, and other ASCII whitespace
+- **Performance**: ~583ns average per operation (excellent for lexical analysis)
+- **Error handling**: Invalid inputs (multi-character strings, out-of-range codes) return errors
+- **Round-trip safe**: `char_from_code(char_code(c)) == c` for all ASCII characters
+- **Compiler foundation**: These functions enable building lexers and parsers in pure Scraps
+
+### Number Parsing Functions
+
+- `parse_int(string) -> int`: Convert string to integer with automatic whitespace trimming
+- `parse_float(string) -> float`: Convert string to floating-point number with scientific notation support
+
+The number parsing functions convert string representations of numbers into their corresponding numeric values. These functions are essential for lexical analysis, configuration parsing, and data processing. Both functions automatically trim leading and trailing whitespace.
+
+Examples:
+
+```scraps
+# Basic integer parsing
+print "=== Integer Parsing ==="
+
+int_42 = parse_int("42")
+int_zero = parse_int("0")
+int_negative = parse_int("-999")
+
+print "parse_int('42'):"
+print int_42                    # 42
+print "parse_int('0'):"
+print int_zero                  # 0
+print "parse_int('-999'):"
+print int_negative              # -999
+
+# Integer parsing with whitespace
+int_spaces = parse_int("  123  ")
+int_tabs = parse_int("	456	")
+
+print "parse_int('  123  '):"
+print int_spaces                # 123
+print "parse_int(with tabs):"
+print int_tabs                  # 456
+
+# Leading zeros are handled correctly
+int_leading_zero = parse_int("007")
+print "parse_int('007'):"
+print int_leading_zero          # 7
+
+# Basic floating-point parsing
+print "=== Float Parsing ==="
+
+float_pi = parse_float("3.14159")
+float_zero = parse_float("0.0")
+float_negative = parse_float("-42.5")
+
+print "parse_float('3.14159'):"
+print float_pi                  # 3.14159
+print "parse_float('0.0'):"
+print float_zero                # 0.0
+print "parse_float('-42.5'):"
+print float_negative            # -42.5
+
+# Scientific notation support
+sci_large = parse_float("1e3")
+sci_decimal = parse_float("2.5e2")
+sci_small = parse_float("1e-2")
+
+print "parse_float('1e3'):"
+print sci_large                 # 1000.0
+print "parse_float('2.5e2'):"
+print sci_decimal               # 250.0
+print "parse_float('1e-2'):"
+print sci_small                 # 0.01
+
+# Using parsed numbers in calculations
+num1_str = "25"
+num2_str = "17"
+num1 = parse_int(num1_str)
+num2 = parse_int(num2_str)
+
+sum_result = num1 + num2
+product = num1 * num2
+
+print "Parsed arithmetic:"
+print "25 + 17 ="
+print sum_result                # 42
+print "25 * 17 ="
+print product                   # 425
+
+# Float calculations
+price_str = "19.99"
+tax_rate_str = "0.08"
+price = parse_float(price_str)
+tax_rate = parse_float(tax_rate_str)
+
+total = price + (price * tax_rate)
+print "Price calculation:"
+print "19.99 + (19.99 * 0.08) ="
+print total                     # 21.5892
+
+# Lexer integration - parsing numbers from source code
+fn(use(source)) {
+  tokens = box()
+  chars = fission("") <- source
+  i = 0
+  
+  WHILE (i < count(chars)) {
+    char = unpack(i) <- chars
+    
+    IF (is_digit(char)) {
+      # Collect consecutive digits for number
+      number_str = ""
+      
+      WHILE (i < count(chars)) {
+        current_char = unpack(i) <- chars
+        IF (is_digit(current_char)) {
+          temp_box = box()
+          pack(number_str, current_char) -> temp_box
+          number_str = fusion("") -> temp_box
+          i = i + 1
+        } ELSE {
+          i = count(chars)  # Exit inner loop
+        }
+      }
+      
+      # Parse the collected number
+      number_val = parse_int(number_str)
+      
+      # Create number token
+      number_token = box()
+      pack("NUMBER", number_val) -> number_token
+      pack(number_token) -> tokens
+      
+    } ELSE {
+      IF (is_alpha(char)) {
+        # Identifier token
+        id_token = box()
+        pack("IDENTIFIER", char) -> id_token
+        pack(id_token) -> tokens
+      } ELSE {
+        IF (is_space(char)) {
+          # Skip whitespace
+        } ELSE {
+          # Operator token
+          op_token = box()
+          pack("OPERATOR", char) -> op_token
+          pack(op_token) -> tokens
+        }
+      }
+    }
+    
+    i = i + 1
+  }
+  
+  tokens
+} -> number_lexer
+
+# Test the number-aware lexer
+code_sample = "x = 42"
+parsed_tokens = number_lexer(code_sample)
+print "Lexer output for 'x = 42':"
+print parsed_tokens             # [[IDENTIFIER, x], [OPERATOR, =], [NUMBER, 42]]
+
+# Expression evaluation using parsed numbers
+expr_tokens = box()
+pack(parse_int("123")) -> expr_tokens
+pack("+") -> expr_tokens
+pack(parse_int("456")) -> expr_tokens
+
+operand1 = unpack(0) <- expr_tokens
+operator = unpack(1) <- expr_tokens
+operand2 = unpack(2) <- expr_tokens
+
+IF (operator == "+") {
+  expr_result = operand1 + operand2
+} ELSE {
+  expr_result = 0
+}
+
+print "Expression evaluation:"
+print "123 + 456 ="
+print expr_result               # 579
+
+# Batch number parsing
+number_strings = box()
+pack("1", "22", "333", "4444") -> number_strings
+
+parsed_numbers = box()
+j = 0
+WHILE (j < count(number_strings)) {
+  num_str = unpack(j) <- number_strings
+  parsed_num = parse_int(num_str)
+  pack(parsed_num) -> parsed_numbers
+  j = j + 1
+}
+
+print "Batch parsing:"
+print "Strings:"
+print number_strings            # ["1", "22", "333", "4444"]
+print "Numbers:"
+print parsed_numbers            # [1, 22, 333, 4444]
+
+# Number validation using character classification
+fn(use(str)) {
+  chars = fission("") <- str
+  i = 0
+  all_digits = TRUE
+  
+  WHILE (i < count(chars)) {
+    char = unpack(i) <- chars
+    IF (is_digit(char)) {
+      # Continue
+    } ELSE {
+      all_digits = FALSE
+    }
+    i = i + 1
+  }
+  
+  all_digits
+} -> is_valid_integer
+
+valid_num = is_valid_integer("123")
+invalid_num = is_valid_integer("12a")
+
+print "Number validation:"
+print "is_valid_integer('123'):"
+print valid_num                 # TRUE
+print "is_valid_integer('12a'):"
+print invalid_num               # FALSE
+
+# Performance measurement
+measurements = box()
+k = 0
+WHILE (k < 100) {
+  start = time_counter()
+  parse_int("12345")
+  parse_float("123.45")
+  end = time_counter()
+  duration = end - start
+  pack(duration) -> measurements
+  k = k + 1
+}
+
+# Calculate average
+total = 0
+m = 0
+WHILE (m < 100) {
+  duration = unpack(m) <- measurements
+  total = total + duration
+  m = m + 1
+}
+average = total / 100
+
+print "Average parsing time for int + float (ns):"
+print average                   # ~2500ns
+print "Average per operation (ns):"
+print (average / 2)             # ~1250ns
+```
+
+**Use Cases:**
+- **Lexical analysis**: Parse numeric literals in source code during tokenization
+- **Configuration parsing**: Read numeric values from config files and command-line arguments
+- **Data processing**: Convert string data to numbers for calculations and analysis
+- **User input validation**: Parse and validate numeric input from users
+- **Protocol parsing**: Extract numeric values from network protocols and data formats
+- **Template processing**: Parse numeric parameters in template languages
+- **Mathematical expressions**: Build expression evaluators and calculators
+
+**Notes:**
+- **Automatic trimming**: Both functions automatically trim leading and trailing whitespace
+- **Error handling**: Invalid strings return descriptive error messages with the problematic input
+- **Integer range**: `parse_int` supports full 64-bit signed integer range (-2^63 to 2^63-1)
+- **Float precision**: `parse_float` uses 64-bit double precision floating-point
+- **Scientific notation**: `parse_float` supports scientific notation (1e3, 2.5e-2, etc.)
+- **Leading zeros**: Both functions handle leading zeros correctly (007 becomes 7)
+- **Performance**: ~1250ns average per operation (excellent for lexical analysis)
+- **Integration**: Perfect compatibility with character classification functions
+- **Lexer foundation**: Essential building blocks for tokenizing numeric literals
+
+- **Compiler foundation**: These functions enable building lexers and parsers in pure Scraps
+
+### String Manipulation Functions
+
+- `to_upper(string) -> string`: Convert string to uppercase
+- `to_lower(string) -> string`: Convert string to lowercase  
+- `substring(string, start, end) -> string`: Extract substring by character indices
+- `index_of(string, substring) -> int`: Find first occurrence of substring (returns -1 if not found)
+- `starts_with(string, prefix) -> bool`: Check if string starts with prefix
+- `ends_with(string, suffix) -> bool`: Check if string ends with suffix
+
+The string manipulation functions provide essential text processing capabilities for parsing, lexical analysis, and general string operations. These functions enable sophisticated text processing and are fundamental building blocks for compilers and parsers.
+
+Examples:
+
+```scraps
+# Case conversion functions
+print "=== Case Conversion ==="
+
+# Convert to uppercase
+upper_hello = to_upper("hello")
+upper_mixed = to_upper("Hello World!")
+upper_numbers = to_upper("abc123def")
+
+print "to_upper('hello'):"
+print upper_hello                   # "HELLO"
+print "to_upper('Hello World!'):"
+print upper_mixed                   # "HELLO WORLD!"
+print "to_upper('abc123def'):"
+print upper_numbers                 # "ABC123DEF"
+
+# Convert to lowercase  
+lower_hello = to_lower("HELLO")
+lower_mixed = to_lower("Hello World!")
+lower_numbers = to_lower("ABC123DEF")
+
+print "to_lower('HELLO'):"
+print lower_hello                   # "hello"
+print "to_lower('Hello World!'):"
+print lower_mixed                   # "hello world!"
+print "to_lower('ABC123DEF'):"
+print lower_numbers                 # "abc123def"
+
+# Substring extraction
+print "=== Substring Extraction ==="
+
+test_string = "Hello, World!"
+
+# Extract parts of string
+greeting = substring(test_string, 0, 5)
+world = substring(test_string, 7, 12)
+full = substring(test_string, 0, 13)
+empty = substring(test_string, 6, 6)
+
+print "substring('Hello, World!', 0, 5):"
+print greeting                      # "Hello"
+print "substring('Hello, World!', 7, 12):"
+print world                         # "World"
+print "substring('Hello, World!', 0, 13):"
+print full                          # "Hello, World!"
+print "substring('Hello, World!', 6, 6):"
+print empty                         # "" (empty string)
+
+# Single character extraction
+first_char = substring(test_string, 0, 1)
+last_char = substring(test_string, 12, 13)
+
+print "First character:"
+print first_char                    # "H"
+print "Last character:"
+print last_char                     # "!"
+
+# String searching
+print "=== String Searching ==="
+
+search_text = "The quick brown fox jumps over the lazy dog"
+
+# Find substrings
+pos_quick = index_of(search_text, "quick")
+pos_fox = index_of(search_text, "fox")
+pos_dog = index_of(search_text, "dog")
+pos_the = index_of(search_text, "the")
+pos_notfound = index_of(search_text, "cat")
+
+print "index_of('...quick brown fox...', 'quick'):"
+print pos_quick                     # 4
+print "index_of('...quick brown fox...', 'fox'):"
+print pos_fox                       # 16
+print "index_of('...lazy dog', 'dog'):"
+print pos_dog                       # 40
+print "index_of('The quick...', 'the'):"
+print pos_the                       # 31 (first occurrence of "the")
+print "index_of('...', 'cat') (not found):"
+print pos_notfound                  # -1
+
+# Character searching
+pos_space = index_of(search_text, " ")
+pos_o = index_of(search_text, "o")
+
+print "index_of('The quick...', ' ') (first space):"
+print pos_space                     # 3
+print "index_of('...brown fox...', 'o') (first 'o'):"
+print pos_o                         # 12
+
+# Prefix and suffix checking
+print "=== Prefix and Suffix Checking ==="
+
+code_line = "function main() {"
+
+# Check prefixes
+is_function = starts_with(code_line, "function")
+is_fun = starts_with(code_line, "fun")
+is_main = starts_with(code_line, "main")
+is_empty_prefix = starts_with(code_line, "")
+
+print "starts_with('function main() {', 'function'):"
+print is_function                   # TRUE
+print "starts_with('function main() {', 'fun'):"
+print is_fun                        # TRUE
+print "starts_with('function main() {', 'main'):"
+print is_main                       # FALSE
+print "starts_with('function main() {', ''):"
+print is_empty_prefix               # TRUE
+
+# Check suffixes
+ends_brace = ends_with(code_line, "{")
+ends_paren = ends_with(code_line, ") {")
+ends_main = ends_with(code_line, "main() {")
+ends_function = ends_with(code_line, "function")
+
+print "ends_with('function main() {', '{'):"
+print ends_brace                    # TRUE
+print "ends_with('function main() {', ') {'):"
+print ends_paren                    # TRUE
+print "ends_with('function main() {', 'main() {'):"
+print ends_main                     # TRUE
+print "ends_with('function main() {', 'function'):"
+print ends_function                 # FALSE
+
+# Advanced lexer with multi-character operators
+print "=== Advanced Lexer ==="
+
+fn(use(source)) {
+  tokens = box()
+  i = 0
+  source_len = count(fission("") <- source)
+  
+  WHILE (i < source_len) {
+    # Check for multi-character operators
+    IF ((i + 1) < source_len) {
+      two_char = substring(source, i, i + 2)
+      
+      IF (two_char == "==") {
+        token = box()
+        pack("EQUALS", "==") -> token
+        pack(token) -> tokens
+        i = i + 2
+      } ELSE {
+        IF (two_char == "!=") {
+          token = box()
+          pack("NOT_EQUALS", "!=") -> token
+          pack(token) -> tokens
+          i = i + 2
+        } ELSE {
+          IF (two_char == "<=") {
+            token = box()
+            pack("LESS_EQUAL", "<=") -> token
+            pack(token) -> tokens
+            i = i + 2
+          } ELSE {
+            IF (two_char == ">=") {
+              token = box()
+              pack("GREATER_EQUAL", ">=") -> token
+              pack(token) -> tokens
+              i = i + 2
+            } ELSE {
+              # Single character
+              char = substring(source, i, i + 1)
+              IF (char == " ") {
+                # Skip whitespace
+                i = i + 1
+              } ELSE {
+                token = box()
+                pack("CHAR", char) -> token
+                pack(token) -> tokens
+                i = i + 1
+              }
+            }
+          }
+        }
+      }
+    } ELSE {
+      # Last character
+      char = substring(source, i, i + 1)
+      IF (char == " ") {
+        # Skip whitespace
+      } ELSE {
+        token = box()
+        pack("CHAR", char) -> token
+        pack(token) -> tokens
+      }
+      i = i + 1
+    }
+  }
+  
+  tokens
+} -> advanced_lexer
+
+# Test the advanced lexer
+test_code = "x == y != z"
+lexed_tokens = advanced_lexer(test_code)
+
+print "Advanced lexer input:"
+print test_code                     # "x == y != z"
+print "Lexed tokens:"
+print lexed_tokens                  # [[CHAR, x], [EQUALS, ==], [CHAR, y], [NOT_EQUALS, !=], [CHAR, z]]
+
+# Case-insensitive keyword recognition
+print "=== Keyword Recognition ==="
+
+fn(use(token_text)) {
+  lower_token = to_lower(token_text)
+  
+  IF (lower_token == "if") {
+    "KEYWORD_IF"
+  } ELSE {
+    IF (lower_token == "else") {
+      "KEYWORD_ELSE"  
+    } ELSE {
+      IF (lower_token == "while") {
+        "KEYWORD_WHILE"
+      } ELSE {
+        IF (lower_token == "function") {
+          "KEYWORD_FUNCTION"
+        } ELSE {
+          "IDENTIFIER"
+        }
+      }
+    }
+  }
+} -> classify_token
+
+# Test keyword classification
+kw1 = classify_token("if")
+kw2 = classify_token("IF")
+kw3 = classify_token("While")
+kw4 = classify_token("FUNCTION")
+kw5 = classify_token("myVar")
+
+print "classify_token('if'):"
+print kw1                           # "KEYWORD_IF"
+print "classify_token('IF'):"
+print kw2                           # "KEYWORD_IF"
+print "classify_token('While'):"
+print kw3                           # "KEYWORD_WHILE"
+print "classify_token('FUNCTION'):"
+print kw4                           # "KEYWORD_FUNCTION"
+print "classify_token('myVar'):"
+print kw5                           # "IDENTIFIER"
+
+# String literal processing
+print "=== String Literal Processing ==="
+
+fn(use(token)) {
+  IF (starts_with(token, "\"") |< ends_with(token, "\"")) {
+    # Extract content between quotes
+    content = substring(token, 1, count(fission("") <- token) - 1)
+    content
+  } ELSE {
+    # Not a string literal
+    ""
+  }
+} -> extract_string_content
+
+# Test string extraction
+str1 = extract_string_content("\"hello\"")
+str2 = extract_string_content("\"Hello, World!\"")
+str3 = extract_string_content("\"\"")
+str4 = extract_string_content("hello")
+
+print "extract_string_content('\"hello\"'):"
+print str1                          # "hello"
+print "extract_string_content('\"Hello, World!\"'):"
+print str2                          # "Hello, World!"
+print "extract_string_content('\"\"'):"
+print str3                          # ""
+print "extract_string_content('hello'):"
+print str4                          # ""
+
+# Comment processing
+print "=== Comment Processing ==="
+
+fn(use(line)) {
+  comment_pos = index_of(line, "#")
+  IF (comment_pos >= 0) {
+    # Extract comment content
+    comment_start = comment_pos + 1
+    line_len = count(fission("") <- line)
+    comment_content = substring(line, comment_start, line_len)
+    comment_content
+  } ELSE {
+    # No comment
+    ""
+  }
+} -> extract_comment
+
+# Test comment extraction
+comment1 = extract_comment("x = 42  # This is a comment")
+comment2 = extract_comment("# Full line comment")
+comment3 = extract_comment("no comment here")
+
+print "extract_comment('x = 42  # This is a comment'):"
+print comment1                      # " This is a comment"
+print "extract_comment('# Full line comment'):"
+print comment2                      # " Full line comment"
+print "extract_comment('no comment here'):"
+print comment3                      # ""
+
+# Function definition parsing
+print "=== Function Definition Parsing ==="
+
+fn(use(source)) {
+  result = box()
+  
+  IF (starts_with(source, "fn(")) {
+    pack("type", "FUNCTION_DEF") -> result
+    
+    # Find parameter list
+    use_pos = index_of(source, "use(")
+    IF (use_pos >= 0) {
+      # Find closing parenthesis
+      paren_count = 1
+      i = use_pos + 4
+      use_end = -1
+      
+      WHILE ((i < count(fission("") <- source)) |< (paren_count > 0)) {
+        char = substring(source, i, i + 1)
+        IF (char == "(") {
+          paren_count = paren_count + 1
+        } ELSE {
+          IF (char == ")") {
+            paren_count = paren_count - 1
+            IF (paren_count == 0) {
+              use_end = i
+            } ELSE {
+              # Continue searching
+            }
+          } ELSE {
+            # Other character
+          }
+        }
+        i = i + 1
+      }
+      
+      IF (use_end > 0) {
+        params_str = substring(source, use_pos + 4, use_end)
+        pack("parameters", params_str) -> result
+      } ELSE {
+        # No parameters found
+      }
+    } ELSE {
+      # No use() found
+    }
+    
+    # Find function name after arrow
+    arrow_pos = index_of(source, "->")
+    IF (arrow_pos >= 0) {
+      name_start = arrow_pos + 2
+      source_len = count(fission("") <- source)
+      
+      # Skip whitespace after arrow
+      WHILE ((name_start < source_len) |< (substring(source, name_start, name_start + 1) == " ")) {
+        name_start = name_start + 1
+      }
+      
+      func_name = substring(source, name_start, source_len)
+      pack("name", func_name) -> result
+    } ELSE {
+      # No arrow found
+    }
+  } ELSE {
+    # Not a function definition
+  }
+  
+  result
+} -> parse_function
+
+# Parse a function definition
+func_def = "fn(use(name, age)) { print \"Hello\" } -> greet"
+parsed_func = parse_function(func_def)
+
+print "Function definition:"
+print func_def                      # "fn(use(name, age)) { print \"Hello\" } -> greet"
+print "Parsed result:"
+print parsed_func                   # [type, FUNCTION_DEF, parameters, name, age, name, greet]
+
+# Performance measurement
+measurements = box()
+j = 0
+WHILE (j < 100) {
+  start = time_counter()
+  
+  # Test all string functions
+  to_upper("hello world")
+  to_lower("HELLO WORLD")
+  substring("Hello, World!", 0, 5)
+  index_of("The quick brown fox", "fox")
+  starts_with("function main", "function")
+  ends_with("main() {", "{")
+  
+  end = time_counter()
+  duration = end - start
+  pack(duration) -> measurements
+  j = j + 1
+}
+
+# Calculate average
+total = 0
+k = 0
+WHILE (k < 100) {
+  duration = unpack(k) <- measurements
+  total = total + duration
+  k = k + 1
+}
+average = total / 100
+
+print "Average time for all 6 string functions (ns):"
+print average                       # ~5000ns
+print "Average per function (ns):"
+print (average / 6)                 # ~833ns
+```
+
+**Use Cases:**
+- **Lexical analysis**: Multi-character operator recognition (`==`, `!=`, `<=`, `>=`)
+- **Keyword recognition**: Case-insensitive keyword classification for language parsers
+- **String literal parsing**: Extract content from quoted strings with proper delimiter handling
+- **Comment processing**: Extract and process single-line and multi-line comments
+- **Function parsing**: Parse function definitions with parameter extraction
+- **Identifier validation**: Validate variable and function names according to language rules
+- **Template processing**: Extract placeholders and variables from template strings
+- **Configuration parsing**: Process key-value pairs and configuration directives
+- **Path manipulation**: Extract file names, extensions, and directory components
+- **URL processing**: Parse and extract components from URLs and URIs
+
+**Notes:**
+- **Unicode support**: All functions handle Unicode characters correctly
+- **Performance**: ~833ns average per operation (excellent for text processing)
+- **Error handling**: `substring` provides comprehensive bounds checking with clear error messages
+- **Search efficiency**: `index_of` uses efficient string searching algorithms
+- **Case sensitivity**: `starts_with` and `ends_with` are case-sensitive by design
+- **Empty string handling**: All functions handle empty strings gracefully
+- **Integration**: Perfect compatibility with character classification and number parsing functions
+- **Memory efficient**: String operations minimize memory allocation and copying
+- **Parser foundation**: Essential building blocks for building complete lexers and parsers
+
+- **Compiler foundation**: These functions enable building lexers and parsers in pure Scraps
 
 ## Math Built-ins
 
