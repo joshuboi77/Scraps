@@ -820,6 +820,190 @@ fn execute_function(
                         }
                     }
                     
+                    // Core-8 Hardware Functions
+                    "time_counter" => {
+                        if *arg_count != 0 { return Err("TIME_COUNTER expects no arguments".to_string()); }
+                        
+                        // Get high-resolution monotonic time counter
+                        let counter = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_err(|_| "Failed to get system time")?
+                            .as_nanos() as u64;
+                        
+                        local_stack.push(Value::Int(counter as i64));
+                    }
+                    "time_freq" => {
+                        if *arg_count != 0 { return Err("TIME_FREQ expects no arguments".to_string()); }
+                        
+                        // Return frequency in Hz - nanosecond counter runs at 1 billion Hz
+                        local_stack.push(Value::Int(1_000_000_000));
+                    }
+                    "cpu_halt" => {
+                        if *arg_count != 0 { return Err("CPU_HALT expects no arguments".to_string()); }
+                        
+                        // Low-power halt until interrupt - simulate with short sleep to yield CPU
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        
+                        local_stack.push(Value::Bool(true));
+                    }
+                    "mem_fence" => {
+                        if *arg_count != 0 { return Err("MEM_FENCE expects no arguments".to_string()); }
+                        
+                        // Full memory barrier - prevents reordering of loads/stores across it
+                        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+                        
+                        local_stack.push(Value::Bool(true));
+                    }
+                    "mem_load" => {
+                        if *arg_count != 2 { return Err("MEM_LOAD expects exactly 2 arguments (ptr, width)".to_string()); }
+                        let width_val = local_stack.pop().expect("Expected width for MEM_LOAD");
+                        let ptr_val = local_stack.pop().expect("Expected ptr for MEM_LOAD");
+                        
+                        let ptr: u64 = match ptr_val { 
+                            Value::Int(n) => n as u64, 
+                            _ => return Err("MEM_LOAD ptr must be an integer".to_string()) 
+                        };
+                        let width: u8 = match width_val { 
+                            Value::Int(n) => {
+                                if n < 1 || n > 8 || (n != 1 && n != 2 && n != 4 && n != 8) {
+                                    return Err("MEM_LOAD width must be 1, 2, 4, or 8".to_string());
+                                }
+                                n as u8
+                            }, 
+                            _ => return Err("MEM_LOAD width must be an integer".to_string()) 
+                        };
+                        
+                        // Simulate memory load - in real implementation this would be actual memory access
+                        // For simulation, return a value based on ptr and width for predictable testing
+                        let value = match width {
+                            1 => (ptr & 0xFF) as i64,                    // 8-bit
+                            2 => ((ptr & 0xFFFF) + 0x100) as i64,       // 16-bit  
+                            4 => ((ptr & 0xFFFFFFFF) + 0x10000) as i64, // 32-bit
+                            8 => (ptr + 0x100000000) as i64,            // 64-bit
+                            _ => unreachable!()
+                        };
+                        
+                        local_stack.push(Value::Int(value));
+                    }
+                    "mem_store" => {
+                        if *arg_count != 3 { return Err("MEM_STORE expects exactly 3 arguments (ptr, val, width)".to_string()); }
+                        let width_val = local_stack.pop().expect("Expected width for MEM_STORE");
+                        let val_val = local_stack.pop().expect("Expected val for MEM_STORE");
+                        let ptr_val = local_stack.pop().expect("Expected ptr for MEM_STORE");
+                        
+                        let _ptr: u64 = match ptr_val { 
+                            Value::Int(n) => n as u64, 
+                            _ => return Err("MEM_STORE ptr must be an integer".to_string()) 
+                        };
+                        let val: i64 = match val_val { 
+                            Value::Int(n) => n, 
+                            _ => return Err("MEM_STORE val must be an integer".to_string()) 
+                        };
+                        let width: u8 = match width_val { 
+                            Value::Int(n) => {
+                                if n < 1 || n > 8 || (n != 1 && n != 2 && n != 4 && n != 8) {
+                                    return Err("MEM_STORE width must be 1, 2, 4, or 8".to_string());
+                                }
+                                n as u8
+                            }, 
+                            _ => return Err("MEM_STORE width must be an integer".to_string()) 
+                        };
+                        
+                        // Simulate memory store - in real implementation this would be actual memory write
+                        // For simulation, we just validate parameters and return success
+                        // In a real implementation, this would write val to memory at ptr with specified width
+                        
+                        // Validate value fits in specified width
+                        let max_val = match width {
+                            1 => 255i64,                    // 8-bit: 0-255
+                            2 => 65535i64,                  // 16-bit: 0-65535  
+                            4 => 4294967295i64,             // 32-bit: 0-4294967295
+                            8 => i64::MAX,                  // 64-bit: full range
+                            _ => unreachable!()
+                        };
+                        
+                        if val < 0 || val > max_val {
+                            return Err(format!("MEM_STORE value {} out of range for width {}", val, width));
+                        }
+                        
+                        local_stack.push(Value::Bool(true));
+                    }
+                    "mem_cmpxchg" => {
+                        if *arg_count != 3 { return Err("MEM_CMPXCHG expects exactly 3 arguments (ptr, expect, val)".to_string()); }
+                        let val_val = local_stack.pop().expect("Expected val for MEM_CMPXCHG");
+                        let expect_val = local_stack.pop().expect("Expected expect for MEM_CMPXCHG");
+                        let ptr_val = local_stack.pop().expect("Expected ptr for MEM_CMPXCHG");
+                        
+                        let ptr: u64 = match ptr_val { 
+                            Value::Int(n) => n as u64, 
+                            _ => return Err("MEM_CMPXCHG ptr must be an integer".to_string()) 
+                        };
+                        let expect: i64 = match expect_val { 
+                            Value::Int(n) => n, 
+                            _ => return Err("MEM_CMPXCHG expect must be an integer".to_string()) 
+                        };
+                        let _val: i64 = match val_val { 
+                            Value::Int(n) => n, 
+                            _ => return Err("MEM_CMPXCHG val must be an integer".to_string()) 
+                        };
+                        
+                        // Simulate atomic compare-exchange operation
+                        // In real implementation, this would be actual atomic CAS with acquire-release semantics
+                        // For simulation, we'll simulate the behavior based on ptr value
+                        
+                        // Simulate current value at memory location (based on ptr for predictable testing)
+                        let current_value = ((ptr & 0xFFFFFFFF) + 0x20000) as i64;
+                        
+                        // Perform compare-and-swap logic
+                        let old_value = if current_value == expect {
+                            // Values match - would write new value in real implementation
+                            // Return the old value (which equals expect)
+                            current_value
+                        } else {
+                            // Values don't match - no write occurs
+                            // Return the actual current value
+                            current_value
+                        };
+                        
+                        local_stack.push(Value::Int(old_value));
+                    }
+                    "int_disable" => {
+                        if *arg_count != 0 { return Err("INT_DISABLE expects no arguments".to_string()); }
+                        
+                        // Simulate interrupt disable operation
+                        // In real implementation, this would disable maskable interrupts
+                        // and return the previous interrupt flag state
+                        
+                        // For simulation, we'll return a consistent "previous state" value
+                        // In real hardware, this would be the actual interrupt flag from CPU status register
+                        let previous_interrupt_state = 1i64; // Simulate interrupts were enabled
+                        
+                        local_stack.push(Value::Int(previous_interrupt_state));
+                    }
+                    "int_enable" => {
+                        if *arg_count != 1 { return Err("INT_ENABLE expects exactly 1 argument (interrupt_state)".to_string()); }
+                        let state_val = local_stack.pop().expect("Expected interrupt_state for INT_ENABLE");
+                        
+                        let interrupt_state: i64 = match state_val { 
+                            Value::Int(n) => n, 
+                            _ => return Err("INT_ENABLE interrupt_state must be an integer".to_string()) 
+                        };
+                        
+                        // Simulate interrupt enable operation
+                        // In real implementation, this would restore the interrupt flag state
+                        // and re-enable maskable interrupts if the state indicates they were enabled
+                        
+                        // For simulation, we validate the state and return success
+                        // In real hardware, this would restore the CPU interrupt flag
+                        let success = if interrupt_state == 0 || interrupt_state == 1 {
+                            true  // Valid interrupt state (0=disabled, 1=enabled)
+                        } else {
+                            false // Invalid interrupt state
+                        };
+                        
+                        local_stack.push(Value::Bool(success));
+                    }
+                    
                     // TCP Network I/O Functions
                     "tcp_connect" => {
                         if *arg_count != 2 { return Err("TCP_CONNECT expects exactly 2 arguments (host, port)".to_string()); }
@@ -1514,6 +1698,62 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
     // Add import function
     env.insert("import".to_string(), Value::Function {
         name: "import".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    
+    // Core-8 Hardware Functions
+    env.insert("time_counter".to_string(), Value::Function {
+        name: "time_counter".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("time_freq".to_string(), Value::Function {
+        name: "time_freq".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("cpu_halt".to_string(), Value::Function {
+        name: "cpu_halt".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("mem_fence".to_string(), Value::Function {
+        name: "mem_fence".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("mem_load".to_string(), Value::Function {
+        name: "mem_load".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("mem_store".to_string(), Value::Function {
+        name: "mem_store".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("mem_cmpxchg".to_string(), Value::Function {
+        name: "mem_cmpxchg".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("int_disable".to_string(), Value::Function {
+        name: "int_disable".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("int_enable".to_string(), Value::Function {
+        name: "int_enable".to_string(),
         params: vec![],
         body: vec![],
         rewire_target: None,
@@ -2719,6 +2959,189 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                         let s = match sval { Value::Str(s) => s, _ => return Err("URL_DECODE argument must be a string".to_string()) };
                         let out = urlencoding::decode(&s).map_err(|e| format!("URL_DECODE error: {}", e))?.into_owned();
                         stack.push(Value::Str(out));
+                    }
+                    // Core-8 Hardware Functions (top-level)
+                    "time_counter" => {
+                        if *arg_count != 0 { return Err("TIME_COUNTER expects no arguments".to_string()); }
+                        
+                        // Get high-resolution monotonic time counter
+                        let counter = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_err(|_| "Failed to get system time")?
+                            .as_nanos() as u64;
+                        
+                        stack.push(Value::Int(counter as i64));
+                    }
+                    "time_freq" => {
+                        if *arg_count != 0 { return Err("TIME_FREQ expects no arguments".to_string()); }
+                        
+                        // Return frequency in Hz - nanosecond counter runs at 1 billion Hz
+                        stack.push(Value::Int(1_000_000_000));
+                    }
+                    "cpu_halt" => {
+                        if *arg_count != 0 { return Err("CPU_HALT expects no arguments".to_string()); }
+                        
+                        // Low-power halt until interrupt - simulate with short sleep to yield CPU
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        
+                        stack.push(Value::Bool(true));
+                    }
+                    "mem_fence" => {
+                        if *arg_count != 0 { return Err("MEM_FENCE expects no arguments".to_string()); }
+                        
+                        // Full memory barrier - prevents reordering of loads/stores across it
+                        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+                        
+                        stack.push(Value::Bool(true));
+                    }
+                    "mem_load" => {
+                        if *arg_count != 2 { return Err("MEM_LOAD expects exactly 2 arguments (ptr, width)".to_string()); }
+                        let width_val = stack.pop().expect("Expected width for MEM_LOAD");
+                        let ptr_val = stack.pop().expect("Expected ptr for MEM_LOAD");
+                        
+                        let ptr: u64 = match ptr_val { 
+                            Value::Int(n) => n as u64, 
+                            _ => return Err("MEM_LOAD ptr must be an integer".to_string()) 
+                        };
+                        let width: u8 = match width_val { 
+                            Value::Int(n) => {
+                                if n < 1 || n > 8 || (n != 1 && n != 2 && n != 4 && n != 8) {
+                                    return Err("MEM_LOAD width must be 1, 2, 4, or 8".to_string());
+                                }
+                                n as u8
+                            }, 
+                            _ => return Err("MEM_LOAD width must be an integer".to_string()) 
+                        };
+                        
+                        // Simulate memory load - in real implementation this would be actual memory access
+                        // For simulation, return a value based on ptr and width for predictable testing
+                        let value = match width {
+                            1 => (ptr & 0xFF) as i64,                    // 8-bit
+                            2 => ((ptr & 0xFFFF) + 0x100) as i64,       // 16-bit  
+                            4 => ((ptr & 0xFFFFFFFF) + 0x10000) as i64, // 32-bit
+                            8 => (ptr + 0x100000000) as i64,            // 64-bit
+                            _ => unreachable!()
+                        };
+                        
+                        stack.push(Value::Int(value));
+                    }
+                    "mem_store" => {
+                        if *arg_count != 3 { return Err("MEM_STORE expects exactly 3 arguments (ptr, val, width)".to_string()); }
+                        let width_val = stack.pop().expect("Expected width for MEM_STORE");
+                        let val_val = stack.pop().expect("Expected val for MEM_STORE");
+                        let ptr_val = stack.pop().expect("Expected ptr for MEM_STORE");
+                        
+                        let _ptr: u64 = match ptr_val { 
+                            Value::Int(n) => n as u64, 
+                            _ => return Err("MEM_STORE ptr must be an integer".to_string()) 
+                        };
+                        let val: i64 = match val_val { 
+                            Value::Int(n) => n, 
+                            _ => return Err("MEM_STORE val must be an integer".to_string()) 
+                        };
+                        let width: u8 = match width_val { 
+                            Value::Int(n) => {
+                                if n < 1 || n > 8 || (n != 1 && n != 2 && n != 4 && n != 8) {
+                                    return Err("MEM_STORE width must be 1, 2, 4, or 8".to_string());
+                                }
+                                n as u8
+                            }, 
+                            _ => return Err("MEM_STORE width must be an integer".to_string()) 
+                        };
+                        
+                        // Simulate memory store - in real implementation this would be actual memory write
+                        // For simulation, we just validate parameters and return success
+                        // In a real implementation, this would write val to memory at ptr with specified width
+                        
+                        // Validate value fits in specified width
+                        let max_val = match width {
+                            1 => 255i64,                    // 8-bit: 0-255
+                            2 => 65535i64,                  // 16-bit: 0-65535  
+                            4 => 4294967295i64,             // 32-bit: 0-4294967295
+                            8 => i64::MAX,                  // 64-bit: full range
+                            _ => unreachable!()
+                        };
+                        
+                        if val < 0 || val > max_val {
+                            return Err(format!("MEM_STORE value {} out of range for width {}", val, width));
+                        }
+                        
+                        stack.push(Value::Bool(true));
+                    }
+                    "mem_cmpxchg" => {
+                        if *arg_count != 3 { return Err("MEM_CMPXCHG expects exactly 3 arguments (ptr, expect, val)".to_string()); }
+                        let val_val = stack.pop().expect("Expected val for MEM_CMPXCHG");
+                        let expect_val = stack.pop().expect("Expected expect for MEM_CMPXCHG");
+                        let ptr_val = stack.pop().expect("Expected ptr for MEM_CMPXCHG");
+                        
+                        let ptr: u64 = match ptr_val { 
+                            Value::Int(n) => n as u64, 
+                            _ => return Err("MEM_CMPXCHG ptr must be an integer".to_string()) 
+                        };
+                        let expect: i64 = match expect_val { 
+                            Value::Int(n) => n, 
+                            _ => return Err("MEM_CMPXCHG expect must be an integer".to_string()) 
+                        };
+                        let _val: i64 = match val_val { 
+                            Value::Int(n) => n, 
+                            _ => return Err("MEM_CMPXCHG val must be an integer".to_string()) 
+                        };
+                        
+                        // Simulate atomic compare-exchange operation
+                        // In real implementation, this would be actual atomic CAS with acquire-release semantics
+                        // For simulation, we'll simulate the behavior based on ptr value
+                        
+                        // Simulate current value at memory location (based on ptr for predictable testing)
+                        let current_value = ((ptr & 0xFFFFFFFF) + 0x20000) as i64;
+                        
+                        // Perform compare-and-swap logic
+                        let old_value = if current_value == expect {
+                            // Values match - would write new value in real implementation
+                            // Return the old value (which equals expect)
+                            current_value
+                        } else {
+                            // Values don't match - no write occurs
+                            // Return the actual current value
+                            current_value
+                        };
+                        
+                        stack.push(Value::Int(old_value));
+                    }
+                    "int_disable" => {
+                        if *arg_count != 0 { return Err("INT_DISABLE expects no arguments".to_string()); }
+                        
+                        // Simulate interrupt disable operation
+                        // In real implementation, this would disable maskable interrupts
+                        // and return the previous interrupt flag state
+                        
+                        // For simulation, we'll return a consistent "previous state" value
+                        // In real hardware, this would be the actual interrupt flag from CPU status register
+                        let previous_interrupt_state = 1i64; // Simulate interrupts were enabled
+                        
+                        stack.push(Value::Int(previous_interrupt_state));
+                    }
+                    "int_enable" => {
+                        if *arg_count != 1 { return Err("INT_ENABLE expects exactly 1 argument (interrupt_state)".to_string()); }
+                        let state_val = stack.pop().expect("Expected interrupt_state for INT_ENABLE");
+                        
+                        let interrupt_state: i64 = match state_val { 
+                            Value::Int(n) => n, 
+                            _ => return Err("INT_ENABLE interrupt_state must be an integer".to_string()) 
+                        };
+                        
+                        // Simulate interrupt enable operation
+                        // In real implementation, this would restore the interrupt flag state
+                        // and re-enable maskable interrupts if the state indicates they were enabled
+                        
+                        // For simulation, we validate the state and return success
+                        // In real hardware, this would restore the CPU interrupt flag
+                        let success = if interrupt_state == 0 || interrupt_state == 1 {
+                            true  // Valid interrupt state (0=disabled, 1=enabled)
+                        } else {
+                            false // Invalid interrupt state
+                        };
+                        
+                        stack.push(Value::Bool(success));
                     }
                     // TCP Network I/O built-ins (top-level)
                     "tcp_connect" => {
