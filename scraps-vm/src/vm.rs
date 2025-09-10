@@ -427,7 +427,15 @@ fn execute_function(
             // Variables
             OpCode::LoadVar(name) => {
                 if let Some(val) = local_env.get(name) {
-                    local_stack.push(val.clone());
+                    // Ensure deep cloning of boxes to maintain immutability
+                    let cloned_val = match val {
+                        Value::Box(contents) => {
+                            // Deep clone the box contents to prevent shared mutable references
+                            Value::Box(contents.clone())
+                        }
+                        other => other.clone()
+                    };
+                    local_stack.push(cloned_val);
                 } else {
                     return Err(format!("Undefined variable '{}' in function", name));
                 }
@@ -1515,7 +1523,15 @@ fn execute_function(
             
             OpCode::StoreVar(name) => {
                 let val = local_stack.pop().expect("Nothing to store");
-                local_env.insert(name.clone(), val);
+                // Ensure deep cloning of boxes to maintain immutability
+                let cloned_val = match val {
+                    Value::Box(contents) => {
+                        // Deep clone the box contents to prevent shared mutable references
+                        Value::Box(contents.clone())
+                    }
+                    other => other
+                };
+                local_env.insert(name.clone(), cloned_val);
             }
             
             OpCode::Print => {
@@ -1526,11 +1542,8 @@ fn execute_function(
                             if is_rewired(&local_env, &s) {
                                 local_env.get(&s).cloned().unwrap_or(Value::Str(s))
                             } else {
-                                // Evaluate string as code (best-effort)
-                                match eval_snippet(local_env, &s) {
-                                    Ok(v) => v,
-                                    Err(_) => Value::Str(s), // fallback to literal
-                                }
+                                // Print strings literally - do not evaluate as code
+                                Value::Str(s)
                             }
                         }
                         other => other,
@@ -2826,11 +2839,8 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                             if is_rewired(&env, &s) {
                                 env.get(&s).cloned().unwrap_or(Value::Str(s))
                             } else {
-                                // Evaluate string as code (best-effort)
-                                match eval_snippet(&mut env, &s) {
-                                    Ok(v) => v,
-                                    Err(_) => Value::Str(s),
-                                }
+                                // Print strings literally - do not evaluate as code
+                                Value::Str(s)
                             }
                         }
                         other => other,
@@ -2842,14 +2852,36 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
             }
             OpCode::LoadVar(name) => {
                 if let Some(val) = env.get(name) {
-                    stack.push(val.clone());
+                    // Ensure deep cloning of boxes to maintain immutability
+                    let cloned_val = match val {
+                        Value::Box(contents) => {
+                            // Deep clone the box contents to prevent shared mutable references
+                            if std::env::var("SCRAPS_DEBUG").is_ok() {
+                                println!("DEBUG LOAD_VAR: Loading box '{}' with {} contents: {:?}", name, contents.len(), contents.iter().map(|v| v.format_for_display()).collect::<Vec<_>>());
+                            }
+                            Value::Box(contents.clone())
+                        }
+                        other => other.clone()
+                    };
+                    stack.push(cloned_val);
                 } else {
                     return Err(format!("Undefined variable '{}'", name));
                 }
             }
             OpCode::StoreVar(name) => {
                 let val = stack.pop().expect("Nothing to store");
-                env.insert(name.clone(), val);
+                // Ensure deep cloning of boxes to maintain immutability
+                let cloned_val = match val {
+                    Value::Box(contents) => {
+                        // Deep clone the box contents to prevent shared mutable references
+                        if std::env::var("SCRAPS_DEBUG").is_ok() {
+                            println!("DEBUG STORE_VAR: Storing box '{}' with {} contents: {:?}", name, contents.len(), contents.iter().map(|v| v.format_for_display()).collect::<Vec<_>>());
+                        }
+                        Value::Box(contents.clone())
+                    }
+                    other => other
+                };
+                env.insert(name.clone(), cloned_val);
             }
             
             // Arithmetic operations
@@ -5183,6 +5215,9 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                         } else {
                             s.split(&delim).map(|p| Value::Str(p.to_string())).collect()
                         };
+                        if std::env::var("SCRAPS_DEBUG").is_ok() {
+                            println!("DEBUG FISSION: Created box with {} parts: {:?}", parts.len(), parts.iter().map(|v| v.format_for_display()).collect::<Vec<_>>());
+                        }
                         stack.push(Value::Box(parts));
                     }
                     "fusion" => {
@@ -5205,6 +5240,54 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                         };
                         let joined = items.join(&delim);
                         stack.push(Value::Str(joined));
+                    }
+                    "unpack" => {
+                        if *arg_count != 2 { return Err("UNPACK expects exactly 2 arguments (box, index)".to_string()); }
+                        let index_val = stack.pop().expect("Expected index for UNPACK");
+                        let box_val = stack.pop().expect("Expected box for UNPACK");
+                        
+                        let index = match index_val {
+                            Value::Int(n) => n,
+                            _ => return Err("UNPACK: index must be an integer".to_string()),
+                        };
+                        
+                        match box_val {
+                            Value::Box(contents) => {
+                                if index < 0 || index >= contents.len() as i64 {
+                                    return Err("UNPACK: index out of bounds".to_string());
+                                }
+                                let extracted = contents[index as usize].clone();
+                                if std::env::var("SCRAPS_DEBUG").is_ok() {
+                                    println!("DEBUG UNPACK: Extracting index {} from box with {} contents. Box contents: {:?}. Extracted: {:?}", 
+                                        index, contents.len(), 
+                                        contents.iter().map(|v| v.format_for_display()).collect::<Vec<_>>(),
+                                        extracted.format_for_display());
+                                }
+                                stack.push(extracted);
+                            }
+                            Value::Str(s) => {
+                                if index < 0 || index >= s.len() as i64 {
+                                    return Err("UNPACK: index out of bounds".to_string());
+                                }
+                                let ch = s.chars().nth(index as usize).unwrap();
+                                stack.push(Value::Str(ch.to_string()));
+                            }
+                            _ => return Err("UNPACK: expected box or string".to_string()),
+                        }
+                    }
+                    "count" => {
+                        if *arg_count != 1 { return Err("COUNT expects exactly 1 argument".to_string()); }
+                        let val = stack.pop().expect("Expected value for COUNT");
+                        
+                        match val {
+                            Value::Box(contents) => {
+                                stack.push(Value::Int(contents.len() as i64));
+                            }
+                            Value::Str(s) => {
+                                stack.push(Value::Int(s.len() as i64));
+                            }
+                            _ => return Err("COUNT: expected box or string".to_string()),
+                        }
                     }
                     "rename" => {
                         if *arg_count != 2 { return Err("RENAME expects exactly 2 arguments".to_string()); }
@@ -5358,18 +5441,6 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                             stack.push(Value::Str(format!("Imported {} selected exports from '{}'", count, src_key)));
                         } else {
                             return Err("IMPORT expects at least 1 argument".to_string());
-                        }
-                    }
-                    "count" => {
-                        if *arg_count != 1 {
-                            return Err("COUNT expects exactly 1 argument".to_string());
-                        }
-                        let arg = stack.pop().expect("Expected argument for COUNT");
-                        match arg {
-                            Value::Box(contents) => stack.push(Value::Int(contents.len() as i64)),
-                            Value::Str(s) => stack.push(Value::Int(s.chars().count() as i64)),
-                            Value::Function { name: _n, params, body: _b, .. } => stack.push(Value::Int(params.len() as i64)),
-                            _ => return Err("COUNT expects box, string, or function".to_string()),
                         }
                     }
                     "result" => {
