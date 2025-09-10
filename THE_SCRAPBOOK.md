@@ -459,6 +459,7 @@ elapsed_ns = (end - start) * 1000000000 / time_freq()
 
 Functions for analyzing individual characters:
 
+### Basic Character Types
 ```scraps
 # Check character types
 is_digit("5")     # TRUE
@@ -472,7 +473,37 @@ is_space("a")     # FALSE
 
 is_alnum("A")     # TRUE (alphanumeric)
 is_alnum("!")     # FALSE
+```
 
+### Extended Character Classification
+```scraps
+# Operators: +, -, *, /, %, =, !, <, >, &, |, ^, ~
+is_operator("+")     # TRUE
+is_operator("=")     # TRUE
+is_operator("a")     # FALSE
+
+# Punctuation: (, ), {, }, [, ], ,, ;, :, ., ?, ", ', `
+is_punctuation("(")  # TRUE
+is_punctuation(".")  # TRUE
+is_punctuation("a")  # FALSE
+
+# Symbols: @, #, $, \, _
+is_symbol("@")       # TRUE
+is_symbol("_")       # TRUE
+is_symbol("a")       # FALSE
+
+# Get comprehensive category
+get_char_category("a")  # "alpha"
+get_char_category("5")  # "digit"
+get_char_category("+")  # "operator"
+get_char_category("(")  # "punctuation"
+get_char_category("@")  # "symbol"
+get_char_category(" ")  # "space"
+get_char_category("€")  # "other"
+```
+
+### Character Codes
+```scraps
 # Get character code
 code = char_code("A")  # 65
 
@@ -480,7 +511,7 @@ code = char_code("A")  # 65
 char = char_from_code(65)  # "A"
 ```
 
-**Use Cases**: Lexical analysis, input validation, text processing, parser construction
+**Use Cases**: Lexical analysis, input validation, text processing, parser construction, tokenization
 
 **Performance**: ~583ns per operation, can process ~1.7M characters per second
 

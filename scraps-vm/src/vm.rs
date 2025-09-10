@@ -2033,6 +2033,30 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
         body: vec![],
         rewire_target: None,
     });
+    env.insert("is_operator".to_string(), Value::Function {
+        name: "is_operator".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("is_punctuation".to_string(), Value::Function {
+        name: "is_punctuation".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("is_symbol".to_string(), Value::Function {
+        name: "is_symbol".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("get_char_category".to_string(), Value::Function {
+        name: "get_char_category".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
     env.insert("char_code".to_string(), Value::Function {
         name: "char_code".to_string(),
         params: vec![],
@@ -3570,6 +3594,92 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                         };
                         
                         stack.push(Value::Bool(result));
+                    }
+                    "is_operator" => {
+                        if *arg_count != 1 { return Err("IS_OPERATOR expects exactly 1 argument (char)".to_string()); }
+                        let char_val = stack.pop().expect("Expected char for IS_OPERATOR");
+                        
+                        let result = match char_val {
+                            Value::Str(s) => {
+                                if s.len() == 1 {
+                                    let c = s.chars().next().unwrap();
+                                    matches!(c, '+' | '-' | '*' | '/' | '%' | '=' | '!' | '<' | '>' | '&' | '|' | '^' | '~')
+                                } else {
+                                    return Err("IS_OPERATOR requires a single character string".to_string());
+                                }
+                            }
+                            _ => return Err("IS_OPERATOR argument must be a string".to_string())
+                        };
+                        
+                        stack.push(Value::Bool(result));
+                    }
+                    "is_punctuation" => {
+                        if *arg_count != 1 { return Err("IS_PUNCTUATION expects exactly 1 argument (char)".to_string()); }
+                        let char_val = stack.pop().expect("Expected char for IS_PUNCTUATION");
+                        
+                        let result = match char_val {
+                            Value::Str(s) => {
+                                if s.len() == 1 {
+                                    let c = s.chars().next().unwrap();
+                                    matches!(c, '(' | ')' | '{' | '}' | '[' | ']' | ',' | ';' | ':' | '.' | '?' | '"' | '\'' | '`')
+                                } else {
+                                    return Err("IS_PUNCTUATION requires a single character string".to_string());
+                                }
+                            }
+                            _ => return Err("IS_PUNCTUATION argument must be a string".to_string())
+                        };
+                        
+                        stack.push(Value::Bool(result));
+                    }
+                    "is_symbol" => {
+                        if *arg_count != 1 { return Err("IS_SYMBOL expects exactly 1 argument (char)".to_string()); }
+                        let char_val = stack.pop().expect("Expected char for IS_SYMBOL");
+                        
+                        let result = match char_val {
+                            Value::Str(s) => {
+                                if s.len() == 1 {
+                                    let c = s.chars().next().unwrap();
+                                    matches!(c, '@' | '#' | '$' | '\\' | '_')
+                                } else {
+                                    return Err("IS_SYMBOL requires a single character string".to_string());
+                                }
+                            }
+                            _ => return Err("IS_SYMBOL argument must be a string".to_string())
+                        };
+                        
+                        stack.push(Value::Bool(result));
+                    }
+                    "get_char_category" => {
+                        if *arg_count != 1 { return Err("GET_CHAR_CATEGORY expects exactly 1 argument (char)".to_string()); }
+                        let char_val = stack.pop().expect("Expected char for GET_CHAR_CATEGORY");
+                        
+                        let category = match char_val {
+                            Value::Str(s) => {
+                                if s.len() == 1 {
+                                    let c = s.chars().next().unwrap();
+                                    if c.is_ascii_alphabetic() {
+                                        "alpha"
+                                    } else if c.is_ascii_digit() {
+                                        "digit"
+                                    } else if c.is_ascii_whitespace() {
+                                        "space"
+                                    } else if matches!(c, '+' | '-' | '*' | '/' | '%' | '=' | '!' | '<' | '>' | '&' | '|' | '^' | '~') {
+                                        "operator"
+                                    } else if matches!(c, '(' | ')' | '{' | '}' | '[' | ']' | ',' | ';' | ':' | '.' | '?' | '"' | '\'' | '`') {
+                                        "punctuation"
+                                    } else if matches!(c, '@' | '#' | '$' | '\\' | '_') {
+                                        "symbol"
+                                    } else {
+                                        "other"
+                                    }
+                                } else {
+                                    return Err("GET_CHAR_CATEGORY requires a single character string".to_string());
+                                }
+                            }
+                            _ => return Err("GET_CHAR_CATEGORY argument must be a string".to_string())
+                        };
+                        
+                        stack.push(Value::Str(category.to_string()));
                     }
                     "char_code" => {
                         if *arg_count != 1 { return Err("CHAR_CODE expects exactly 1 argument (char)".to_string()); }
