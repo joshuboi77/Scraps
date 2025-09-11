@@ -1,0 +1,3 @@
+# Minimal test program
+x = 42 + 17
+print x

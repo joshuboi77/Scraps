@@ -2080,25 +2080,25 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
     });
     env.insert("is_operator".to_string(), Value::Function {
         name: "is_operator".to_string(),
-        params: vec![],
+        params: vec!["char".to_string()],
         body: vec![],
         rewire_target: None,
     });
     env.insert("is_punctuation".to_string(), Value::Function {
         name: "is_punctuation".to_string(),
-        params: vec![],
+        params: vec!["char".to_string()],
         body: vec![],
         rewire_target: None,
     });
     env.insert("is_symbol".to_string(), Value::Function {
         name: "is_symbol".to_string(),
-        params: vec![],
+        params: vec!["char".to_string()],
         body: vec![],
         rewire_target: None,
     });
     env.insert("get_char_category".to_string(), Value::Function {
         name: "get_char_category".to_string(),
-        params: vec![],
+        params: vec!["char".to_string()],
         body: vec![],
         rewire_target: None,
     });

@@ -1,9 +1,9 @@
 .DS_Store
 
-*.scraps
-
 target/
 
 python/
 
 test/
+
+legacy/

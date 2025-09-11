@@ -1,0 +1,31 @@
+# Simple Scraps program for testing the compiler
+
+# Variable assignment
+x = 42
+y = 17
+
+# Arithmetic
+result = x + y
+
+# Function definition
+fn(use(a, b)) {
+  sum = a + b
+  sum
+} -> add_numbers
+
+# Function call
+total = add_numbers(x, y)
+
+# Conditional
+if (total > 50) {
+  print "Large number"
+} else {
+  print "Small number"
+}
+
+# Loop
+counter = 0
+while (counter < 5) {
+  print counter
+  counter = counter + 1
+}
