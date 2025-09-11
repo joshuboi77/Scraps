@@ -803,7 +803,7 @@ fn execute_function(
                                 let mut exports = HashMap::new();
                                 for (key, value) in module_env.iter() {
                                     if !key.starts_with("__") &&
-                                       !["box","pack","place","unpack","pick","count","print",
+                                       !["box","pack","place","unpack","pick","count","contains","print",
                                          "result","string","read","write","fission","fusion",
                                          "rewire_symbol","ship","import"].contains(&key.as_str()) {
                                         match local_env.get(key) {
@@ -1528,6 +1528,18 @@ fn execute_function(
                         let arg = local_stack.pop().expect("Expected argument for COUNT");
                         match arg { Value::Box(contents) => local_stack.push(Value::Int(contents.len() as i64)), Value::Str(s) => local_stack.push(Value::Int(s.chars().count() as i64)), Value::Function { name: _n, params, body: _b, .. } => local_stack.push(Value::Int(params.len() as i64)), _ => return Err("COUNT expects box, string, or function".to_string()) }
                     }
+                    "contains" => {
+                        if *arg_count != 2 { return Err("CONTAINS expects exactly 2 arguments".to_string()); }
+                        let item = local_stack.pop().expect("Expected item for CONTAINS");
+                        let box_val = local_stack.pop().expect("Expected box for CONTAINS");
+                        match box_val {
+                            Value::Box(contents) => {
+                                let found = contents.iter().any(|v| v == &item);
+                                local_stack.push(Value::Bool(found));
+                            }
+                            _ => return Err("CONTAINS expects box as first argument".to_string())
+                        }
+                    }
                     _ => {
                         match func {
                             Value::Function { name, params, body, .. } => {
@@ -1817,6 +1829,12 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
     });
     env.insert("count".to_string(), Value::Function {
         name: "count".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("contains".to_string(), Value::Function {
+        name: "contains".to_string(),
         params: vec![],
         body: vec![],
         rewire_target: None,
@@ -5450,6 +5468,18 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                             _ => return Err("COUNT: expected box or string".to_string()),
                         }
                     }
+                    "contains" => {
+                        if *arg_count != 2 { return Err("CONTAINS expects exactly 2 arguments".to_string()); }
+                        let item = stack.pop().expect("Expected item for CONTAINS");
+                        let box_val = stack.pop().expect("Expected box for CONTAINS");
+                        match box_val {
+                            Value::Box(contents) => {
+                                let found = contents.iter().any(|v| v == &item);
+                                stack.push(Value::Bool(found));
+                            }
+                            _ => return Err("CONTAINS expects box as first argument".to_string())
+                        }
+                    }
                     "rename" => {
                         if *arg_count != 2 { return Err("RENAME expects exactly 2 arguments".to_string()); }
                         let to_val = stack.pop().expect("Expected destination name for RENAME");
@@ -5479,7 +5509,7 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                                 let mut exports = HashMap::new();
                                 for (key, value) in module_env.iter() {
                                     if !key.starts_with("__") &&
-                                       !["box","pack","place","unpack","pick","count","print",
+                                       !["box","pack","place","unpack","pick","count","contains","print",
                                          "result","string","read","write","fission","fusion",
                                          "rewire_symbol","ship","import"].contains(&key.as_str()) {
                                         match env.get(key) {

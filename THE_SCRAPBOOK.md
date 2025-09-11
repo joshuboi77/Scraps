@@ -364,6 +364,15 @@ pack(" ") -> delims
 pack("\n") -> delims
 tokens = fission(delims) <- source
 # tokens = ["x", "=", "42", "+", "17", "print", "x"]
+
+# CONTAINS - Check if item exists in box
+keywords = box()
+pack("print") -> keywords
+pack("if") -> keywords
+pack("while") -> keywords
+
+result = contains(keywords, "print")  # TRUE
+result = contains(keywords, "xyz")    # FALSE
 ```
 
 ### COUNT - Getting Size
@@ -834,6 +843,7 @@ print tokens
 - `fission(delimiter) <- string` - Split string (single delimiter)
 - `fission(delimiters) <- string` - Split string (multiple delimiters in box)
 - `fusion(delimiter) -> box` - Join strings
+- `contains(box, item)` - Check if item exists in box
 - `print value` - Output value
 - `test condition` - Assert condition
 - `result(function_call)` - Get function result
