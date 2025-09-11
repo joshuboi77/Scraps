@@ -76,6 +76,20 @@ pack("None") -> LITERALS
 delims = box()
 pack(" ") -> delims
 pack("\n") -> delims
+pack("(") -> delims
+pack(")") -> delims
+pack("{") -> delims
+pack("}") -> delims
+pack("[") -> delims
+pack("]") -> delims
+pack(",") -> delims
+pack(";") -> delims
+pack(":") -> delims
+pack(".") -> delims
+pack("?") -> delims
+pack("\"") -> delims
+pack("'") -> delims
+pack("`") -> delims
 mut_1 = fission(delims) <- SOURCE
 
 print mut_1
@@ -148,6 +162,8 @@ WHILE (i < t) {
       }
       }
     }
-    print TOKENS
-    print TYPES
 }
+
+print count(mut_1)
+print TYPES
+print count(TYPES)
