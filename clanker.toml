@@ -1,0 +1,13 @@
+# Scraps Project Manifest
+# This file defines the project structure and module dependencies
+
+[modules]
+# Core compiler modules
+lexer = "lexer.scraps"
+parser = "parser.scraps"
+codegen = "codegen.scraps"
+main = "main.scraps"
+
+[paths]
+# Source code directory (where .scraps files are located)
+sources = "void"

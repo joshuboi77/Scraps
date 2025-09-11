@@ -73,6 +73,9 @@ pub enum Expr {
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
+    // Metadata
+    Line(usize),
+
     // Basic statements
     Print(Expr),
     Test(Expr),
@@ -187,7 +190,10 @@ impl Parser {
                 break;
             }
             
+            let line_no = self.peek().line;
             let stmt = self.statement()?;
+            // Insert a line marker before each top-level statement
+            statements.push(Stmt::Line(line_no));
             statements.push(stmt);
             
             // Skip newlines after statement (don't require them)
@@ -881,7 +887,10 @@ impl Parser {
                 break;
             }
 
+            let line_no = self.peek().line;
             let stmt = self.statement()?;
+            // Insert a line marker before each statement inside a block
+            statements.push(Stmt::Line(line_no));
             statements.push(stmt);
 
             // Consume any trailing newlines after the statement; do not consume '}' here.

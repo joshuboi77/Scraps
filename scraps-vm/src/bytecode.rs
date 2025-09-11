@@ -9,6 +9,9 @@ pub enum OpCode {
     PushBool(bool),
     PushStr(String),
     
+    // Debug/metadata
+    SetLine(usize), // update current source line for context
+    
     // Box operations
     MakeBox,
     Pack,

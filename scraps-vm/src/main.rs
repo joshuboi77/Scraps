@@ -116,8 +116,9 @@ fn main() {
                     let mut compiler = Compiler::new();
                     let bytecode = compiler.compile(program.statements);
                     
-                    if let Err(e) = vm::run(&bytecode) {
+                    if let Err(e) = vm::run_with_context(&bytecode, Some(filename), 0) {
                         eprintln!("Runtime error: {}", e);
+                        eprintln!("Tip: Check your array indices and make sure they're within bounds");
                     }
                 }
                 Err(e) => eprintln!("Parser error: {}", e),

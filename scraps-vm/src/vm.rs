@@ -25,7 +25,26 @@ use serde_json::{self, Value as JsonValue, Number as JsonNumber};
 use base64::{engine::general_purpose, Engine as _};
 use urlencoding;
 
+#[derive(Debug, Clone)]
+struct ExecutionContext {
+    source_file: Option<String>,
+    current_line: usize,
+    instruction_index: usize,
+}
+
 const REWIRED_KEY: &str = "__rewired__";
+
+fn format_error_with_context(context: Option<&ExecutionContext>, message: &str) -> String {
+    if let Some(context) = context {
+        if let Some(ref file) = context.source_file {
+            format!("{} (at {}:{}: instruction {})", message, file, context.current_line, context.instruction_index)
+        } else {
+            format!("{} (at instruction {})", message, context.instruction_index)
+        }
+    } else {
+        message.to_string()
+    }
+}
 
 static TCP_MANAGER_GLOBAL: OnceLock<Mutex<TcpSocketManager>> = OnceLock::new();
 static WS_MANAGER_GLOBAL: OnceLock<Mutex<WebSocketManager>> = OnceLock::new();
@@ -283,7 +302,7 @@ fn eval_snippet(env: &mut HashMap<String, Value>, src: &str) -> Result<Value, St
     let bytecode = compiler.compile(program.statements);
     // Execute in the provided environment, capture the last value on stack
     let mut stack: Vec<Value> = Vec::new();
-    execute_function(&bytecode, &mut stack, env)
+    execute_function(&bytecode, &mut stack, env, None)
 }
 
 fn parse_modules_manifest(content: &str) -> HashMap<String, String> {
@@ -408,16 +427,30 @@ fn load_module_from_key(env: &mut HashMap<String, Value>, key: &str) -> Result<(
 fn execute_function(
     body: &[OpCode], 
     _stack: &mut Vec<Value>, 
-    env: &mut HashMap<String, Value>
+    env: &mut HashMap<String, Value>,
+    context: Option<&ExecutionContext>,
 ) -> Result<Value, String> {
     let mut local_stack = Vec::new();
     let local_env = env; // operate on provided environment
     let mut ip: usize = 0;
+    let mut local_line: usize = context.map(|c| c.current_line).unwrap_or(0);
+    // Precompute while ranges within this function body
+    let label_map = build_label_map(body)?;
+    let mut while_ranges: Vec<(usize, usize)> = Vec::new();
+    for (name, &idx) in label_map.iter() {
+        if let Some(suffix) = name.strip_prefix("while_body_") {
+            let end_label = format!("while_end_{}", suffix);
+            if let Some(&end_idx) = label_map.get(&end_label) {
+                while_ranges.push((idx, end_idx));
+            }
+        }
+    }
     
         while ip < body.len() {
             let instr = &body[ip];
             
             match instr {
+            OpCode::SetLine(n) => { local_line = *n; }
             // Stack operations
             OpCode::PushInt(n) => local_stack.push(Value::Int(*n)),
             OpCode::PushFloat(f) => local_stack.push(Value::Float(*f)),
@@ -467,26 +500,88 @@ fn execute_function(
 
                 let start_idx = match start {
                     Value::Int(n) => n,
-                    _ => return Err("UNPACK start index must be integer".to_string()),
+                    _ => return Err(format!("UNPACK start index must be integer, got: {:?} (type: {})", start, match start {
+                        Value::Str(_) => "string",
+                        Value::Int(_) => "int", 
+                        Value::Float(_) => "float",
+                        Value::Bool(_) => "bool",
+                        Value::Box(_) => "box",
+                        Value::Function { .. } => "function",
+                        Value::None => "none",
+                        Value::TcpConnection(_) => "tcp_connection",
+                        Value::TcpListener(_) => "tcp_listener",
+                        Value::WebSocket(_) => "websocket",
+                        Value::UdpSocket(_) => "udp_socket",
+                        Value::TlsConnection(_) => "tls_connection",
+                        Value::TlsListener(_) => "tls_listener",
+                        Value::RawSocket(_) => "raw_socket",
+                    })),
                 };
                 let end_idx = if let Some(end_val) = end_opt {
                     match end_val {
                         Value::Int(n) => Some(n),
-                        _ => return Err("UNPACK end index must be integer".to_string()),
+                        _ => return Err(format!("UNPACK end index must be integer, got: {:?}", end_val)),
                     }
                 } else { None };
 
                 match box_val {
                     Value::Box(contents) => {
                         if end_idx.is_none() {
+                            let in_while = while_ranges.iter().any(|(s,e)| ip >= *s && ip <= *e);
+                            if std::env::var("SCRAPS_DEBUG").is_ok() {
+                                if let Some(ctx) = context {
+                                    if let Some(ref file) = ctx.source_file {
+                                        eprintln!(
+                                            "UNPACK DEBUG: [function{}] {}:{} | ip {} - trying to access index {} from array of length {}",
+                                            if in_while { ", while" } else { "" },
+                                            file,
+                                            local_line,
+                                            ip,
+                                            start_idx,
+                                            contents.len()
+                                        );
+                                    } else {
+                                        eprintln!(
+                                            "UNPACK DEBUG: [function{}] ip {} - trying to access index {} from array of length {}",
+                                            if in_while { ", while" } else { "" },
+                                            ip,
+                                            start_idx,
+                                            contents.len()
+                                        );
+                                    }
+                                } else {
+                                    eprintln!(
+                                        "UNPACK DEBUG: [function{}] ip {} - trying to access index {} from array of length {}",
+                                        if in_while { ", while" } else { "" },
+                                        ip,
+                                        start_idx,
+                                        contents.len()
+                                    );
+                                }
+                            }
                             if start_idx < 0 || start_idx >= contents.len() as i64 {
-                                return Err("UNPACK: index out of bounds".to_string());
+                                // Use a proxy context with updated line and local ip
+                                let proxy_ctx = context.map(|c| ExecutionContext {
+                                    source_file: c.source_file.clone(),
+                                    current_line: local_line,
+                                    instruction_index: ip,
+                                });
+                                return Err(format_error_with_context(proxy_ctx.as_ref(), &format!(
+                                    "UNPACK: index out of bounds - tried to access index {} but array has length {} (contents: {:?})",
+                                    start_idx, contents.len(), contents)));
                             }
                             local_stack.push(contents[start_idx as usize].clone());
                         } else {
                             let end = end_idx.unwrap();
                             if start_idx < 0 || end < start_idx || end > contents.len() as i64 {
-                                return Err("UNPACK: slice out of bounds".to_string());
+                                let proxy_ctx = context.map(|c| ExecutionContext {
+                                    source_file: c.source_file.clone(),
+                                    current_line: local_line,
+                                    instruction_index: ip,
+                                });
+                                return Err(format_error_with_context(proxy_ctx.as_ref(), &format!(
+                                    "UNPACK: slice out of bounds - tried to slice from {} to {} but array has length {} (contents: {:?})",
+                                    start_idx, end, contents.len(), contents)));
                             }
                             let slice = contents[start_idx as usize..end as usize].to_vec();
                             local_stack.push(Value::Box(slice));
@@ -495,14 +590,28 @@ fn execute_function(
                     Value::Str(s) => {
                         if end_idx.is_none() {
                             if start_idx < 0 || start_idx >= s.len() as i64 {
-                                return Err("UNPACK: index out of bounds".to_string());
+                                let proxy_ctx = context.map(|c| ExecutionContext {
+                                    source_file: c.source_file.clone(),
+                                    current_line: local_line,
+                                    instruction_index: ip,
+                                });
+                                return Err(format_error_with_context(proxy_ctx.as_ref(), &format!(
+                                    "UNPACK: index out of bounds - tried to access index {} but string has length {} (contents: {:?})",
+                                    start_idx, s.len(), s)));
                             }
                             let ch = s.chars().nth(start_idx as usize).unwrap();
                             local_stack.push(Value::Str(ch.to_string()));
                         } else {
                             let end = end_idx.unwrap();
                             if start_idx < 0 || end < start_idx || end > s.len() as i64 {
-                                return Err("UNPACK: slice out of bounds".to_string());
+                                let proxy_ctx = context.map(|c| ExecutionContext {
+                                    source_file: c.source_file.clone(),
+                                    current_line: local_line,
+                                    instruction_index: ip,
+                                });
+                                return Err(format_error_with_context(proxy_ctx.as_ref(), &format!(
+                                    "UNPACK: slice out of bounds - tried to slice from {} to {} but string has length {} (contents: {:?})",
+                                    start_idx, end, s.len(), s)));
                             }
                             let slice: String = s.chars().skip(start_idx as usize).take((end - start_idx) as usize).collect();
                             local_stack.push(Value::Str(slice));
@@ -798,7 +907,7 @@ fn execute_function(
                                 // Execute the factory in a cloned environment to collect its definitions
                                 let mut module_env = local_env.clone();
                                 let mut tmp_stack: Vec<Value> = Vec::new();
-                                let _ = execute_function(&body, &mut tmp_stack, &mut module_env)?;
+                                let _ = execute_function(&body, &mut tmp_stack, &mut module_env, context)?;
                                 // Diff module_env against env to get new/changed definitions
                                 let mut exports = HashMap::new();
                                 for (key, value) in module_env.iter() {
@@ -1311,7 +1420,7 @@ fn execute_function(
                                         func_env.insert(param_name.clone(), value.clone());
                                     }
                                 }
-                                let result = execute_function(&body, &mut local_stack, &mut func_env)?;
+                                let result = execute_function(&body, &mut local_stack, &mut func_env, context)?;
                                 if let Some(target) = rewire_target {
                                     if let Some(new_val) = func_env.get(&target) {
                                         local_env.insert(target.clone(), new_val.clone());
@@ -1540,6 +1649,38 @@ fn execute_function(
                             _ => return Err("CONTAINS expects box as first argument".to_string())
                         }
                     }
+                    "get_char_category" => {
+                        if *arg_count != 1 { return Err("GET_CHAR_CATEGORY expects exactly 1 argument (char)".to_string()); }
+                        let char_val = local_stack.pop().expect("Expected char for GET_CHAR_CATEGORY");
+                        
+                        let category = match char_val {
+                            Value::Str(s) => {
+                                if s.len() == 1 {
+                                    let c = s.chars().next().unwrap();
+                                    if c.is_ascii_alphabetic() {
+                                        "alpha"
+                                    } else if c.is_ascii_digit() {
+                                        "digit"
+                                    } else if c.is_ascii_whitespace() {
+                                        "space"
+                                    } else if matches!(c, '+' | '-' | '*' | '/' | '%' | '=' | '!' | '<' | '>' | '&' | '|' | '^' | '~') {
+                                        "operator"
+                                    } else if matches!(c, '(' | ')' | '{' | '}' | '[' | ']' | ',' | ';' | ':' | '.' | '?' | '"' | '\'' | '`') {
+                                        "punctuation"
+                                    } else if matches!(c, '@' | '#' | '$' | '\\' | '_') {
+                                        "symbol"
+                                    } else {
+                                        "other"
+                                    }
+                                } else {
+                                    return Err("GET_CHAR_CATEGORY requires a single character string".to_string());
+                                }
+                            }
+                            _ => return Err("GET_CHAR_CATEGORY argument must be a string".to_string())
+                        };
+                        
+                        local_stack.push(Value::Str(category.to_string()));
+                    }
                     _ => {
                         match func {
                             Value::Function { name, params, body, .. } => {
@@ -1551,7 +1692,7 @@ fn execute_function(
                                 let mut env_copy = local_env.clone();
                                 for (i, p) in params.iter().enumerate() { env_copy.insert(p.clone(), args[i].clone()); }
                                 let body_clone = body.clone();
-                                let result = execute_function(&body_clone, &mut local_stack, &mut env_copy)?;
+                                let result = execute_function(&body_clone, &mut local_stack, &mut env_copy, context)?;
                                 local_stack.push(result);
                             }
                             _ => return Err(format!("'{}' is not a function", func_name)),
@@ -1628,6 +1769,11 @@ fn execute_function(
                     (Value::Float(x), Value::Float(y)) => local_stack.push(Value::Float(x + y)),
                     (Value::Int(x), Value::Float(y)) => local_stack.push(Value::Float(x as f64 + y)),
                     (Value::Float(x), Value::Int(y)) => local_stack.push(Value::Float(x + y as f64)),
+                    (Value::Str(x), Value::Str(y)) => local_stack.push(Value::Str(x + &y)),
+                    (Value::Str(x), Value::Int(y)) => local_stack.push(Value::Str(x + &y.to_string())),
+                    (Value::Str(x), Value::Float(y)) => local_stack.push(Value::Str(x + &y.to_string())),
+                    (Value::Int(x), Value::Str(y)) => local_stack.push(Value::Str(x.to_string() + &y)),
+                    (Value::Float(x), Value::Str(y)) => local_stack.push(Value::Str(x.to_string() + &y)),
                     _ => return Err("Type error in addition".to_string()),
                 }
             }
@@ -1791,7 +1937,13 @@ fn execute_function(
     Ok(local_stack.pop().unwrap_or(Value::None))
 }
 
-pub fn run(program: &[OpCode]) -> Result<(), String> {
+pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_line: usize) -> Result<(), String> {
+    let mut context = ExecutionContext {
+        source_file: source_file.map(|s| s.to_string()),
+        current_line,
+        instruction_index: 0,
+    };
+    
     let mut stack: Vec<Value> = Vec::new();
     let mut env: HashMap<String, Value> = HashMap::new();
     let mut tcp_manager = TcpSocketManager::new();
@@ -2703,12 +2855,26 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
     let mut ip: usize = 0; // Instruction pointer
     
     // Build label map for jump targets (used by jump instructions)
-    let _label_map = build_label_map(program)?;
+    let label_map = build_label_map(program)?;
+    // Precompute while body ranges for context annotation
+    let mut while_ranges: Vec<(usize, usize)> = Vec::new();
+    for (name, &idx) in label_map.iter() {
+        if let Some(suffix) = name.strip_prefix("while_body_") {
+            let end_label = format!("while_end_{}", suffix);
+            if let Some(&end_idx) = label_map.get(&end_label) {
+                while_ranges.push((idx, end_idx));
+            }
+        }
+    }
 
     while ip < program.len() {
         let instr = &program[ip];
+        context.instruction_index = ip;
         
         match instr {
+            OpCode::SetLine(n) => {
+                context.current_line = *n;
+            }
             // Stack operations
             OpCode::PushInt(n) => stack.push(Value::Int(*n)),
             OpCode::PushFloat(f) => stack.push(Value::Float(*f)),
@@ -2763,7 +2929,22 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                 // Convert start and end to integers
                 let start_idx = match start {
                     Value::Int(n) => n,
-                    _ => return Err("UNPACK start index must be integer".to_string()),
+                    _ => return Err(format!("UNPACK start index must be integer, got: {:?} (type: {})", start, match start {
+                        Value::Str(_) => "string",
+                        Value::Int(_) => "int", 
+                        Value::Float(_) => "float",
+                        Value::Bool(_) => "bool",
+                        Value::Box(_) => "box",
+                        Value::Function { .. } => "function",
+                        Value::None => "none",
+                        Value::TcpConnection(_) => "tcp_connection",
+                        Value::TcpListener(_) => "tcp_listener",
+                        Value::WebSocket(_) => "websocket",
+                        Value::UdpSocket(_) => "udp_socket",
+                        Value::TlsConnection(_) => "tls_connection",
+                        Value::TlsListener(_) => "tls_listener",
+                        Value::RawSocket(_) => "raw_socket",
+                    })),
                 };
                 
                 let end_idx = if let Some(end_val) = end_opt {
@@ -2780,15 +2961,42 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                     Value::Box(contents) => {
                         if end_idx.is_none() {
                             // Single element extraction
+                            // Debug: Print what we're trying to do (include file + instruction pointer + loop context)
+                            let in_while = while_ranges.iter().any(|(s,e)| ip >= *s && ip <= *e);
+                            if std::env::var("SCRAPS_DEBUG").is_ok() {
+                                if let Some(ref file) = context.source_file {
+                                    eprintln!(
+                                        "UNPACK DEBUG: [{}{}] {}:{} | ip {} - trying to access index {} from array of length {}",
+                                        "top",
+                                        if in_while { ", while" } else { "" },
+                                        file,
+                                        context.current_line,
+                                        context.instruction_index,
+                                        start_idx,
+                                        contents.len()
+                                    );
+                                } else {
+                                    eprintln!(
+                                        "UNPACK DEBUG: [{}{}] ip {} - trying to access index {} from array of length {}",
+                                        "top",
+                                        if in_while { ", while" } else { "" },
+                                        context.instruction_index,
+                                        start_idx,
+                                        contents.len()
+                                    );
+                                }
+                            }
                             if start_idx < 0 || start_idx >= contents.len() as i64 {
-                                return Err("UNPACK: index out of bounds".to_string());
+                                return Err(format_error_with_context(Some(&context), &format!("UNPACK: index out of bounds - tried to access index {} but array has length {} (contents: {:?})", 
+                                    start_idx, contents.len(), contents)));
                             }
                             stack.push(contents[start_idx as usize].clone());
                         } else {
                             // Slice extraction
                             let end = end_idx.unwrap();
                             if start_idx < 0 || end < start_idx || end > contents.len() as i64 {
-                                return Err("UNPACK: slice out of bounds".to_string());
+                                return Err(format_error_with_context(Some(&context), &format!("UNPACK: slice out of bounds - tried to slice from {} to {} but array has length {} (contents: {:?})", 
+                                    start_idx, end, contents.len(), contents)));
                             }
                             let slice = contents[start_idx as usize..end as usize].to_vec();
                             stack.push(Value::Box(slice));
@@ -2798,7 +3006,8 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                         if end_idx.is_none() {
                             // Single character extraction
                             if start_idx < 0 || start_idx >= s.len() as i64 {
-                                return Err("UNPACK: index out of bounds".to_string());
+                                return Err(format_error_with_context(None, &format!("UNPACK: index out of bounds - tried to access index {} but string has length {} (contents: {:?})", 
+                                    start_idx, s.len(), s)));
                             }
                             let ch = s.chars().nth(start_idx as usize).unwrap();
                             stack.push(Value::Str(ch.to_string()));
@@ -2806,7 +3015,8 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                             // String slice extraction
                             let end = end_idx.unwrap();
                             if start_idx < 0 || end < start_idx || end > s.len() as i64 {
-                                return Err("UNPACK: slice out of bounds".to_string());
+                                return Err(format_error_with_context(None, &format!("UNPACK: slice out of bounds - tried to slice from {} to {} but string has length {} (contents: {:?})", 
+                                    start_idx, end, s.len(), s)));
                             }
                             let slice: String = s.chars().skip(start_idx as usize).take((end - start_idx) as usize).collect();
                             stack.push(Value::Str(slice));
@@ -2962,6 +3172,11 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                     (Value::Float(x), Value::Float(y)) => stack.push(Value::Float(x + y)),
                     (Value::Int(x), Value::Float(y)) => stack.push(Value::Float(x as f64 + y)),
                     (Value::Float(x), Value::Int(y)) => stack.push(Value::Float(x + y as f64)),
+                    (Value::Str(x), Value::Str(y)) => stack.push(Value::Str(x + &y)),
+                    (Value::Str(x), Value::Int(y)) => stack.push(Value::Str(x + &y.to_string())),
+                    (Value::Str(x), Value::Float(y)) => stack.push(Value::Str(x + &y.to_string())),
+                    (Value::Int(x), Value::Str(y)) => stack.push(Value::Str(x.to_string() + &y)),
+                    (Value::Float(x), Value::Str(y)) => stack.push(Value::Str(x.to_string() + &y)),
                     _ => return Err("Type error in addition".to_string()),
                 }
             }
@@ -5433,7 +5648,8 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                         match box_val {
                             Value::Box(contents) => {
                                 if index < 0 || index >= contents.len() as i64 {
-                                    return Err("UNPACK: index out of bounds".to_string());
+                                    return Err(format_error_with_context(Some(&context), &format!("UNPACK: index out of bounds - tried to access index {} but array has length {} (contents: {:?})", 
+                                    index, contents.len(), contents)));
                                 }
                                 let extracted = contents[index as usize].clone();
                                 if std::env::var("SCRAPS_DEBUG").is_ok() {
@@ -5446,7 +5662,8 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                             }
                             Value::Str(s) => {
                                 if index < 0 || index >= s.len() as i64 {
-                                    return Err("UNPACK: index out of bounds".to_string());
+                                    return Err(format_error_with_context(Some(&context), &format!("UNPACK: index out of bounds - tried to access index {} but string has length {} (contents: {:?})", 
+                                    index, s.len(), s)));
                                 }
                                 let ch = s.chars().nth(index as usize).unwrap();
                                 stack.push(Value::Str(ch.to_string()));
@@ -5504,7 +5721,7 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                                 // Execute the factory in a cloned environment to collect its definitions
                                 let mut module_env = env.clone();
                                 let mut tmp_stack: Vec<Value> = Vec::new();
-                                let _ = execute_function(&body, &mut tmp_stack, &mut module_env)?;
+                                let _ = execute_function(&body, &mut tmp_stack, &mut module_env, Some(&context))?;
                                 // Diff module_env against env to get new/changed definitions
                                 let mut exports = HashMap::new();
                                 for (key, value) in module_env.iter() {
@@ -5658,7 +5875,7 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                                 }
                                 
                                 let mut func_env_mut = func_env;
-                                let result = execute_function(&body, &mut stack, &mut func_env_mut)?;
+                                let result = execute_function(&body, &mut stack, &mut func_env_mut, Some(&context))?;
                                 // If this is a rewire function, propagate the target back to env
                                 if let Some(target) = rewire_target {
                                     if let Some(new_val) = func_env_mut.get(&target) {
@@ -5685,7 +5902,7 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                                 let mut env_clone = env.clone();
                                 for (i, p) in params.iter().enumerate() { env_clone.insert(p.clone(), args[i].clone()); }
                                 let body_clone = body.clone();
-                                let result = execute_function(&body_clone, &mut stack, &mut env_clone)?;
+                                let result = execute_function(&body_clone, &mut stack, &mut env_clone, Some(&context))?;
                                 stack.push(result);
                             }
                             _ => return Err(format!("'{}' is not a function", func_name)),

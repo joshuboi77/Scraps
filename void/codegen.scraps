@@ -1,0 +1,286 @@
+# Scraps Code Generator Module
+# Provides assembly code generation functionality for the Scraps compiler
+
+# =============================================================================
+# ASSEMBLY GENERATION FUNCTIONS
+# =============================================================================
+
+# Generate assembly header
+fn(use()) {
+  header = "section .text\n"
+  header = header + "global _start\n"
+  header = header + "_start:\n"
+  header
+} -> generate_header
+
+# Generate assembly footer
+fn(use()) {
+  footer = "\n    mov rax, 60     ; sys_exit\n"
+  footer = footer + "    mov rdi, 0      ; exit code\n"
+  footer = footer + "    syscall\n\n"
+  footer = footer + "section .data\n"
+  footer
+} -> generate_footer
+
+# Generate variable declaration
+fn(use(var_name)) {
+  var_name + ": dq 0\n"
+} -> generate_var_decl
+
+# Generate number loading
+fn(use(num)) {
+  "    mov rax, " + num + "\n"
+} -> generate_load_num
+
+# Generate addition
+fn(use()) {
+  "    add rax, rbx\n"
+} -> generate_add
+
+# Generate subtraction
+fn(use()) {
+  "    sub rax, rbx\n"
+} -> generate_sub
+
+# Generate multiplication
+fn(use()) {
+  "    mul rbx\n"
+} -> generate_mul
+
+# Generate division
+fn(use()) {
+  "    div rbx\n"
+} -> generate_div
+
+# Generate variable store
+fn(use(var_name)) {
+  "    mov [" + var_name + "], rax\n"
+} -> generate_store_var
+
+# Generate variable load
+fn(use(var_name)) {
+  "    mov rbx, [" + var_name + "]\n"
+} -> generate_load_var
+
+# Generate print (simple version - just exit for now)
+fn(use()) {
+  "    ; TODO: Implement print\n"
+} -> generate_print
+
+# Generate comment
+fn(use(comment)) {
+  "    ; " + comment + "\n"
+} -> generate_comment
+
+# =============================================================================
+# MAIN CODE GENERATOR
+# =============================================================================
+
+# Generate assembly from tokens and types
+fn(use(tokens, types)) {
+  assembly = generate_header()
+  var_decls = box()
+  i = 0
+  token_count = count(tokens)
+  
+  # First pass: collect variable declarations
+  WHILE (i < token_count) {
+    token = unpack(i) <- tokens
+    type = unpack(i) <- types
+    i = i + 1
+    
+    IF (type == "ID") {
+      IF (i < token_count) {
+        next_type = unpack(i) <- types
+        IF (next_type == "OP") {
+          IF (contains(var_decls, token) == FALSE) {
+            pack(token) -> var_decls
+          } ELSE {
+            dummy = 0
+          }
+        } ELSE {
+          dummy = 0
+        }
+      } ELSE {
+        dummy = 0
+      }
+    } ELSE {
+      dummy = 0
+    }
+  }
+  
+  # Generate variable declarations
+  decl_count = count(var_decls)
+  j = 0
+  WHILE (j < decl_count) {
+    var = unpack(j) <- var_decls
+    assembly = assembly + generate_var_decl(var)
+    j = j + 1
+  }
+  
+  # Generate main code
+  i = 0
+  WHILE (i < token_count) {
+    token = unpack(i) <- tokens
+    type = unpack(i) <- types
+    i = i + 1
+    
+    IF (type == "NUM") {
+      assembly = assembly + generate_load_num(token)
+    } ELSE {
+      IF (type == "OP") {
+        IF (token == "+") {
+          IF (i < token_count) {
+            next_token = unpack(i) <- tokens
+            next_type = unpack(i) <- types
+            i = i + 1
+            IF (next_type == "NUM") {
+              assembly = assembly + "    mov rbx, " + next_token + "\n"
+              assembly = assembly + generate_add()
+            } ELSE {
+              dummy = 0
+            }
+          } ELSE {
+            dummy = 0
+          }
+        } ELSE {
+          IF (token == "-") {
+            IF (i < token_count) {
+              next_token = unpack(i) <- tokens
+              next_type = unpack(i) <- types
+              i = i + 1
+              IF (next_type == "NUM") {
+                assembly = assembly + "    mov rbx, " + next_token + "\n"
+                assembly = assembly + generate_sub()
+              } ELSE {
+                dummy = 0
+              }
+            } ELSE {
+              dummy = 0
+            }
+          } ELSE {
+            IF (token == "*") {
+              IF (i < token_count) {
+                next_token = unpack(i) <- tokens
+                next_type = unpack(i) <- types
+                i = i + 1
+                IF (next_type == "NUM") {
+                  assembly = assembly + "    mov rbx, " + next_token + "\n"
+                  assembly = assembly + generate_mul()
+                } ELSE {
+                  dummy = 0
+                }
+              } ELSE {
+                dummy = 0
+              }
+            } ELSE {
+              IF (token == "/") {
+                IF (i < token_count) {
+                  next_token = unpack(i) <- tokens
+                  next_type = unpack(i) <- types
+                  i = i + 1
+                  IF (next_type == "NUM") {
+                    assembly = assembly + "    mov rbx, " + next_token + "\n"
+                    assembly = assembly + generate_div()
+                  } ELSE {
+                    dummy = 0
+                  }
+                } ELSE {
+                  dummy = 0
+                }
+              } ELSE {
+                IF (token == "=") {
+                  IF (i >= 2) {
+                    var_token = unpack(i - 2) <- tokens
+                    assembly = assembly + generate_store_var(var_token)
+                  } ELSE {
+                    dummy = 0
+                  }
+                } ELSE {
+                  dummy = 0
+                }
+              }
+            }
+          }
+        }
+      } ELSE {
+        IF (type == "KW") {
+          IF (token == "print") {
+            assembly = assembly + generate_print()
+          } ELSE {
+            dummy = 0
+          }
+        } ELSE {
+          dummy = 0
+        }
+      }
+    }
+  }
+  
+  assembly = assembly + generate_footer()
+  assembly
+} -> generate_assembly
+
+# Generate simple arithmetic expression
+fn(use(left, op, right)) {
+  assembly = generate_header()
+  assembly = assembly + generate_load_num(left)
+  assembly = assembly + "    mov rbx, " + right + "\n"
+  
+  IF (op == "+") {
+    assembly = assembly + generate_add()
+  } ELSE {
+    IF (op == "-") {
+      assembly = assembly + generate_sub()
+    } ELSE {
+      IF (op == "*") {
+        assembly = assembly + generate_mul()
+      } ELSE {
+        IF (op == "/") {
+          assembly = assembly + generate_div()
+        } ELSE {
+          assembly = assembly + generate_comment("Unknown operator: " + op)
+        }
+      }
+    }
+  }
+  
+  assembly = assembly + generate_footer()
+  assembly
+} -> generate_arithmetic
+
+# Generate variable assignment
+fn(use(var_name, value)) {
+  assembly = generate_header()
+  assembly = assembly + generate_var_decl(var_name)
+  assembly = assembly + generate_load_num(value)
+  assembly = assembly + generate_store_var(var_name)
+  assembly = assembly + generate_footer()
+  assembly
+} -> generate_assignment
+
+# =============================================================================
+# MODULE EXPORTS
+# =============================================================================
+
+# Export all functions for use by other modules
+exports = box()
+pack("generate_assembly", generate_assembly) -> exports
+pack("generate_arithmetic", generate_arithmetic) -> exports
+pack("generate_assignment", generate_assignment) -> exports
+pack("generate_header", generate_header) -> exports
+pack("generate_footer", generate_footer) -> exports
+pack("generate_var_decl", generate_var_decl) -> exports
+pack("generate_load_num", generate_load_num) -> exports
+pack("generate_add", generate_add) -> exports
+pack("generate_sub", generate_sub) -> exports
+pack("generate_mul", generate_mul) -> exports
+pack("generate_div", generate_div) -> exports
+pack("generate_store_var", generate_store_var) -> exports
+pack("generate_load_var", generate_load_var) -> exports
+pack("generate_print", generate_print) -> exports
+pack("generate_comment", generate_comment) -> exports
+
+# Store module exports in global environment
+__module_codegen = box()
+pack("codegen", exports) -> __module_codegen

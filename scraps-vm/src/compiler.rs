@@ -42,6 +42,10 @@ impl Compiler {
 
     fn compile_statement(&mut self, stmt: Stmt) {
         match stmt {
+            Stmt::Line(n) => {
+                // Insert a SetLine marker for runtime context
+                self.program.push(OpCode::SetLine(n));
+            }
             Stmt::Print(expr) => {
                 self.compile_expression(expr);
                 self.program.push(OpCode::Print);
