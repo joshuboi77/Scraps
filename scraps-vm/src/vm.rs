@@ -1460,8 +1460,35 @@ fn execute_function(
                         let string_val = local_stack.pop().expect("Expected string for FISSION");
                         let delim_val = local_stack.pop().expect("Expected delimiter for FISSION");
                         let s = match string_val { Value::Str(s) => s, _ => return Err("FISSION: string must be a string".to_string()) };
-                        let delim = match delim_val { Value::Str(s) => s, _ => return Err("FISSION: delimiter must be a string".to_string()) };
-                        let parts: Vec<Value> = if delim.is_empty() { s.chars().map(|c| Value::Str(c.to_string())).collect() } else { s.split(&delim).map(|p| Value::Str(p.to_string())).collect() };
+                        
+                        let parts: Vec<Value> = match delim_val {
+                            Value::Str(delim) => {
+                                if delim.is_empty() {
+                                    s.chars().map(|c| Value::Str(c.to_string())).collect()
+                                } else {
+                                    s.split(&delim).map(|p| Value::Str(p.to_string())).collect()
+                                }
+                            }
+                            Value::Box(delims) => {
+                                // Multiple delimiters - split on any of them
+                                let mut result = vec![s.to_string()];
+                                for delim_val in delims {
+                                    if let Value::Str(delim) = delim_val {
+                                        let mut new_result = Vec::new();
+                                        for part in result {
+                                            for subpart in part.split(&delim) {
+                                                if !subpart.is_empty() {
+                                                    new_result.push(subpart.to_string());
+                                                }
+                                            }
+                                        }
+                                        result = new_result;
+                                    }
+                                }
+                                result.into_iter().map(|p| Value::Str(p)).collect()
+                            }
+                            _ => return Err("FISSION: delimiter must be a string or box of strings".to_string())
+                        };
                         local_stack.push(Value::Box(parts));
                     }
                     "fusion" => { if *arg_count != 2 { return Err("FUSION expects exactly 2 arguments".to_string()); }
@@ -5319,12 +5346,36 @@ pub fn run(program: &[OpCode]) -> Result<(), String> {
                         let string_val = stack.pop().expect("Expected string for FISSION");
                         let delim_val = stack.pop().expect("Expected delimiter for FISSION");
                         let s = match string_val { Value::Str(s) => s, _ => return Err("FISSION: string must be a string".to_string()) };
-                        let delim = match delim_val { Value::Str(s) => s, _ => return Err("FISSION: delimiter must be a string".to_string()) };
-                        let parts: Vec<Value> = if delim.is_empty() {
-                            s.chars().map(|c| Value::Str(c.to_string())).collect()
-                        } else {
-                            s.split(&delim).map(|p| Value::Str(p.to_string())).collect()
+                        
+                        let parts: Vec<Value> = match delim_val {
+                            Value::Str(delim) => {
+                                if delim.is_empty() {
+                                    s.chars().map(|c| Value::Str(c.to_string())).collect()
+                                } else {
+                                    s.split(&delim).map(|p| Value::Str(p.to_string())).collect()
+                                }
+                            }
+                            Value::Box(delims) => {
+                                // Multiple delimiters - split on any of them
+                                let mut result = vec![s.to_string()];
+                                for delim_val in delims {
+                                    if let Value::Str(delim) = delim_val {
+                                        let mut new_result = Vec::new();
+                                        for part in result {
+                                            for subpart in part.split(&delim) {
+                                                if !subpart.is_empty() {
+                                                    new_result.push(subpart.to_string());
+                                                }
+                                            }
+                                        }
+                                        result = new_result;
+                                    }
+                                }
+                                result.into_iter().map(|p| Value::Str(p)).collect()
+                            }
+                            _ => return Err("FISSION: delimiter must be a string or box of strings".to_string())
                         };
+                        
                         if std::env::var("SCRAPS_DEBUG").is_ok() {
                             println!("DEBUG FISSION: Created box with {} parts: {:?}", parts.len(), parts.iter().map(|v| v.format_for_display()).collect::<Vec<_>>());
                         }

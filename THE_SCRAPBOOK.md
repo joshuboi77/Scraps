@@ -352,10 +352,18 @@ pack("h", "e", "l", "l", "o") -> chars
 text = fusion("") -> chars
 # text = "hello"
 
-# Split by delimiter
+# Split by single delimiter
 sentence = "apple,banana,cherry"
 fruits = fission(",") <- sentence
 # fruits = ["apple", "banana", "cherry"]
+
+# Split by multiple delimiters (NEW!)
+source = "x = 42 + 17\nprint x"
+delims = box()
+pack(" ") -> delims
+pack("\n") -> delims
+tokens = fission(delims) <- source
+# tokens = ["x", "=", "42", "+", "17", "print", "x"]
 ```
 
 ### COUNT - Getting Size
@@ -823,7 +831,8 @@ print tokens
 - `pack(items...) -> box` - Add items to box
 - `unpack(index) <- box` - Get item from box
 - `count(box)` - Get box size
-- `fission(delimiter) <- string` - Split string
+- `fission(delimiter) <- string` - Split string (single delimiter)
+- `fission(delimiters) <- string` - Split string (multiple delimiters in box)
 - `fusion(delimiter) -> box` - Join strings
 - `print value` - Output value
 - `test condition` - Assert condition
