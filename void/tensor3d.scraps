@@ -1,0 +1,118 @@
+# 3D Tensor Implementation in Pure Scraps
+# Tensor3D is represented as a box with:
+# - index 0: data (flat box of all elements)
+# - index 1: shape (box: [depth, rows, cols])
+
+# Create a 3D tensor with given shape, initialized with zeros
+fn(use(depth, rows, cols)) {
+  data = box()
+  total = depth * rows * cols
+  i = 0
+  WHILE (i < total) {
+    pack(0.0) -> data
+    i = i + 1
+  }
+
+  shape = box()
+  pack(depth, rows, cols) -> shape
+
+  tensor = box()
+  pack(data) -> tensor    # index 0: data
+  pack(shape) -> tensor   # index 1: shape
+
+  tensor
+} -> create_tensor3d
+
+# Get tensor3d shape: [depth, rows, cols]
+fn(use(tensor3d)) {
+  unpack(1) <- tensor3d
+} -> tensor3d_shape
+
+# Total number of elements
+fn(use(tensor3d)) {
+  shape = tensor3d_shape(tensor3d)
+  d = unpack(0) <- shape
+  r = unpack(1) <- shape
+  c = unpack(2) <- shape
+  d * r * c
+} -> tensor3d_size
+
+# Convert (d, r, c) -> flat index (row-major within each depth plane)
+fn(use(tensor3d, d, r, c)) {
+  shape = tensor3d_shape(tensor3d)
+  rows = unpack(1) <- shape
+  cols = unpack(2) <- shape
+  plane = rows * cols
+  (d * plane) + (r * cols) + c
+} -> tensor3d_index
+
+# Get element at (d, r, c)
+fn(use(tensor3d, d, r, c)) {
+  data = unpack(0) <- tensor3d
+  idx = tensor3d_index(tensor3d, d, r, c)
+  unpack(idx) <- data
+} -> tensor3d_get
+
+# Set element at (d, r, c) to value (returns a new tensor)
+fn(use(tensor3d, d, r, c, value)) {
+  old_data = unpack(0) <- tensor3d
+  shape = tensor3d_shape(tensor3d)
+
+  new_data = box()
+  idx = tensor3d_index(tensor3d, d, r, c)
+  total = tensor3d_size(tensor3d)
+
+  i = 0
+  WHILE (i < total) {
+    IF (i == idx) {
+      pack(value) -> new_data
+    } ELSE {
+      v = unpack(i) <- old_data
+      pack(v) -> new_data
+    }
+    i = i + 1
+  }
+
+  new_tensor = box()
+  pack(new_data) -> new_tensor
+  pack(shape) -> new_tensor
+  new_tensor
+} -> tensor3d_set
+
+# Mutable alias (still returns a new tensor; placeholder for future optimizations)
+fn(use(tensor3d, d, r, c, value)) {
+  tensor3d_set(tensor3d, d, r, c, value)
+} -> tensor3d_set_mut
+
+# Pretty-print tensor contents
+fn(use(tensor3d)) {
+  shape = tensor3d_shape(tensor3d)
+  depth = unpack(0) <- shape
+  rows = unpack(1) <- shape
+  cols = unpack(2) <- shape
+  print "Tensor3D shape: [" + depth + ", " + rows + ", " + cols + "]"
+
+  d = 0
+  WHILE (d < depth) {
+    print "Depth " + d + ":"
+    r = 0
+    WHILE (r < rows) {
+      row_str = "["
+      c = 0
+      WHILE (c < cols) {
+        elem = tensor3d_get(tensor3d, d, r, c)
+        IF (c == 0) {
+          row_str = row_str + elem
+        } ELSE {
+          row_str = row_str + ", " + elem
+        }
+        c = c + 1
+      }
+      row_str = row_str + "]"
+      print row_str
+      r = r + 1
+    }
+    d = d + 1
+  }
+} -> tensor3d_print
+

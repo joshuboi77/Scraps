@@ -1,0 +1,22 @@
+# Network interfaces and IPv6 helper tests (prints only)
+print "=== Network Interfaces ==="
+ifs = get_interfaces()
+print ifs
+lo = get_loopback_interface()
+print lo
+pi = get_primary_interface()
+print pi
+
+IF (count(ifs) > 0) {
+  name = unpack(0) <- ifs
+  print get_interface_info(name)
+  print get_interface_stats(name)
+} ELSE {
+  print "no interfaces"
+}
+
+print "=== IPv6 Helpers ==="
+print ipv6_is_ipv6_address("::1")
+print ipv6_is_ipv4_address("127.0.0.1")
+print ipv6_get_config()
+print ipv6_create_dual_stack_socket("localhost", 80, TRUE)

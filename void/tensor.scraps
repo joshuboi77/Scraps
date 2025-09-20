@@ -1,0 +1,120 @@
+# Tensor Implementation in Pure Scraps
+# A tensor is represented as a box with:
+# - "data": flat box containing all elements
+# - "shape": box containing dimensions [rows, cols, ...]
+
+# Create a tensor with given shape, initialized with zeros
+fn(use(rows, cols)) {
+  # Create flat data array filled with zeros
+  data = box()
+  total_elements = rows * cols
+  i = 0
+  WHILE (i < total_elements) {
+    pack(0.0) -> data
+    i = i + 1
+  }
+  
+  # Create shape descriptor
+  shape = box()
+  pack(rows, cols) -> shape
+  
+  # Create tensor structure
+  tensor = box()
+  pack(data) -> tensor    # index 0: data
+  pack(shape) -> tensor   # index 1: shape
+  
+  tensor
+} -> create_tensor
+
+# Get tensor dimensions
+fn(use(tensor)) {
+  shape = unpack(1) <- tensor
+  shape
+} -> tensor_shape
+
+# Get total number of elements
+fn(use(tensor)) {
+  shape = unpack(1) <- tensor
+  rows = unpack(0) <- shape
+  cols = unpack(1) <- shape
+  rows * cols
+} -> tensor_size
+
+# Convert 2D coordinates (row, col) to flat index
+fn(use(tensor, row, col)) {
+  shape = unpack(1) <- tensor
+  cols = unpack(1) <- shape
+  (row * cols) + col
+} -> tensor_index
+
+# Get element at position (row, col)
+fn(use(tensor, row, col)) {
+  data = unpack(0) <- tensor
+  flat_index = tensor_index(tensor, row, col)
+  unpack(flat_index) <- data
+} -> tensor_get
+
+# Set element at position (row, col) to value
+# Returns updated tensor (creates new tensor due to immutability)
+fn(use(tensor, row, col, value)) {
+  # Get current data and shape
+  old_data = unpack(0) <- tensor
+  shape = unpack(1) <- tensor
+  
+  # Create new data array with updated value
+  new_data = box()
+  flat_index = tensor_index(tensor, row, col)
+  total_size = tensor_size(tensor)
+  
+  i = 0
+  WHILE (i < total_size) {
+    IF (i == flat_index) {
+      pack(value) -> new_data
+    } ELSE {
+      old_value = unpack(i) <- old_data
+      pack(old_value) -> new_data
+    }
+    i = i + 1
+  }
+  
+  # Create new tensor with updated data
+  new_tensor = box()
+  pack(new_data) -> new_tensor
+  pack(shape) -> new_tensor
+  
+  new_tensor
+} -> tensor_set
+
+# Alternative tensor_set that's more efficient (still creates new tensor)
+# Since dynamic place operations aren't supported yet, this is the same as tensor_set
+fn(use(tensor, row, col, value)) {
+  tensor_set(tensor, row, col, value)
+} -> tensor_set_mut
+
+# Display tensor in readable format
+fn(use(tensor)) {
+  shape = unpack(1) <- tensor
+  rows = unpack(0) <- shape
+  cols = unpack(1) <- shape
+  data = unpack(0) <- tensor
+  
+  print "Tensor shape: [" + rows + ", " + cols + "]"
+  
+  row = 0
+  WHILE (row < rows) {
+    row_str = "["
+    col = 0
+    WHILE (col < cols) {
+      element = tensor_get(tensor, row, col)
+      IF (col == 0) {
+        row_str = row_str + element
+      } ELSE {
+        row_str = row_str + ", " + element
+      }
+      col = col + 1
+    }
+    row_str = row_str + "]"
+    print row_str
+    row = row + 1
+  }
+} -> tensor_print

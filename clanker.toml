@@ -1,4 +1,3 @@
-# Scraps Project Manifest
 # This file defines the project structure and module dependencies
 
 [modules]
@@ -7,6 +6,9 @@ lexer = "lexer.scraps"
 parser = "parser.scraps"
 codegen = "codegen.scraps"
 main = "main.scraps"
+# Tensor library
+tensor = "tensor.scraps"
+tensor3d = "tensor3d.scraps"
 
 [paths]
 # Source code directory (where .scraps files are located)

@@ -1,0 +1,9 @@
+# Packet builder tests (no raw socket required)
+print "=== Packet Builders ==="
+icmp = packet_build_icmp_echo(1, 1, "ping")
+print "icmp bytes: " + count(fission("") <- icmp)
+hdr = packet_build_ipv4_header("192.168.0.1", "8.8.8.8", 1, count(fission("") <- icmp))
+print "ipv4 header bytes: " + count(fission("") <- hdr)
+chk = packet_calculate_checksum(icmp)
+print "checksum: " + chk
+

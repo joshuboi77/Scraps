@@ -254,15 +254,120 @@ WHILE ((i < count(items)) |< (found == FALSE)) {
 
 ### TEST Assertions
 ```scraps
-# Test assertions for validation
+# Test assertions for validation (current behavior prints TRUE/FALSE)
 x = 42
-test (x == 42)        # Passes silently
-test (x > 50)         # Would fail with error
+test (x == 42)        # prints TRUE
+test (x > 50)         # prints FALSE (no error)
 
 # Use in testing and validation
 result = calculate_something()
-test (result > 0)     # Ensure positive result
+test (result > 0)     # prints TRUE/FALSE
 ```
+Note: At present, `test` prints the boolean result and does not halt execution on failure.
+
+---
+
+## 📦 Module System
+
+### Project Structure with clanker.toml
+```toml
+# clanker.toml - Project manifest file
+[modules]
+# Define module mappings
+lexer = "lexer.scraps"
+parser = "parser.scraps" 
+main = "main.scraps"
+
+[paths]
+# Source directory
+sources = "void"
+```
+
+### IMPORT - Loading Modules
+```scraps
+# Import module by name (from clanker.toml)
+import("lexer")
+
+# Import with alias
+import("lex") <- "lexer"
+
+# After import, module's global variables and functions become available
+print count(KEYWORDS)  # Access KEYWORDS from lexer module
+
+# Import multiple modules
+import("lexer")
+import("codegen")
+import("parser")
+```
+
+### SHIP - Exporting Module Definitions
+```scraps
+# Create module factory function
+fn(use()) {
+  # Define module contents
+  MODULE_VERSION = "1.0.0"
+  
+  fn(use(x)) {
+    x * 2
+  } -> double_value
+  
+  # Ship exports all definitions created in this function
+  ship_result = ship()
+  ship_result
+} -> my_module
+
+# Execute to create and export the module
+result(my_module)  # Returns "Module 'my_module' shipped with N exports"
+```
+
+### RENAME - Renaming Modules
+```scraps
+# Rename a module in the module system
+result1 = rename("old_module_name", "new_module_name")
+print result1  # "OK" if successful
+
+# After renaming, import with new name
+import("new_module_name")
+```
+
+### REWIRE_SYMBOL - Dynamic Symbol Binding
+```scraps
+# Mark symbols as rewirable for dynamic binding
+rewire_symbol("dynamic_var")    # Returns None
+rewire_symbol("dynamic_func")   # Returns None
+
+# Now these symbols can be used with rewire statements
+fn(use()) {
+  rewire dynamic_var = "Hello World!"
+  rewire dynamic_func = some_function
+  dynamic_var
+} -> setup_dynamics
+```
+
+### Module Development
+```scraps
+# my_module.scraps - Define functions and variables
+CONSTANTS = box()
+pack("VALUE1", "VALUE2") -> CONSTANTS
+
+fn(use(x, y)) {
+  x + y
+} -> add_function
+
+# Use ship() for formal exports
+fn(use()) {
+  # Reference definitions to export them
+  CONSTANTS
+  add_function
+  ship()  # Export all definitions created in this scope
+} -> my_module_factory
+
+result(my_module_factory)  # Execute to ship the module
+```
+
+**Use Cases**: Code organization, reusable libraries, modular compilation, dependency management
+
+**Performance**: Module loading ~2-5ms, import resolution ~500ns per symbol
 
 ---
 
@@ -337,6 +442,38 @@ IF (count(my_box) > 2) {
 } ELSE {
   third = None
 }
+```
+
+### PICK - Multi-Select from Boxes
+```scraps
+# Pick single element (same as unpack)
+my_box = box()
+pack("apple", "banana", "cherry", "date") -> my_box
+second = pick(1) <- my_box  # "banana"
+
+# Pick multiple elements by indices
+selected = pick(0, 2, 3) <- my_box  # ["apple", "cherry", "date"]
+
+# Pick from strings
+text = "hello"
+char = pick(1) <- text        # "e"
+chars = pick(1, 2, 4) <- text # "elo"
+```
+
+### PLACE - Setting Values at Indices
+```scraps
+# Place value at specific index
+my_box = box()
+pack("apple", "banana", "cherry") -> my_box
+
+# Replace existing value
+place(1:"ORANGE") -> my_box  # ["apple", "ORANGE", "cherry"]
+
+# Place beyond current size (auto-resizes with None)
+place(5:"GRAPE") -> my_box   # ["apple", "ORANGE", "cherry", None, None, "GRAPE"]
+
+# Multiple placements
+place(0:"FIRST", 2:"THIRD") -> my_box
 ```
 
 ### String Operations
@@ -839,6 +976,8 @@ print tokens
 - `box()` - Create empty box
 - `pack(items...) -> box` - Add items to box
 - `unpack(index) <- box` - Get item from box
+- `pick(indices...) <- box` - Select multiple elements from box or string
+- `place(index:value, ...) -> box` - Set values at specific indices in box
 - `count(box)` - Get box size
 - `fission(delimiter) <- string` - Split string (single delimiter)
 - `fission(delimiters) <- string` - Split string (multiple delimiters in box)
@@ -847,6 +986,11 @@ print tokens
 - `print value` - Output value
 - `test condition` - Assert condition
 - `result(function_call)` - Get function result
+- `import(module_name)` - Load and import module from clanker.toml
+- `import(alias) <- module` - Import module with alias
+- `ship()` - Export all definitions created in current function scope
+- `rename(from, to)` - Rename a module in the module system
+- `rewire_symbol(symbol_name)` - Mark symbol as rewirable for dynamic binding
 
 ### Core-8 Hardware Functions
 - `mem_load(ptr, width) -> int` - Read memory
@@ -866,6 +1010,10 @@ print tokens
 - `is_alnum(char) -> bool` - Check if alphanumeric
 - `char_code(char) -> int` - Get character code
 - `char_from_code(int) -> char` - Create character
+- `is_operator(char) -> bool` - Operator characters (+-*/%=!<>&|^~)
+- `is_punctuation(char) -> bool` - Punctuation ((){}[],;:.?"'`)
+- `is_symbol(char) -> bool` - Symbols (@ # $ \ _)
+- `get_char_category(char) -> string` - One of: alpha, digit, space, operator, punctuation, symbol, other
 
 ### Number Parsing
 - `parse_int(string) -> int` - Parse integer
@@ -889,9 +1037,151 @@ print tokens
 - `tcp_connect(host, port) -> socket`
 - `tcp_send(socket, data)`
 - `tcp_receive(socket, size) -> string`
-- `tcp_close(socket)`
-- `tcp_listen(host, port) -> server`
-- `tcp_accept(server) -> socket`
+- `tcp_try_receive(socket, size) -> string` — Non-blocking; empty string if none
+- `tcp_close(socket_or_listener)`
+- `tcp_listen(port) -> listener`
+- `tcp_accept(listener) -> socket`
+
+### HTTP & JSON
+- `http_get(url[, headers]) -> [status:int, headers:[[k,v]], body:string]`
+- `http_post(url, data[, headers]) -> [status, headers, body]`
+- `http_put(url, data[, headers]) -> [status, headers, body]`
+- `http_delete(url[, headers]) -> [status, headers, body]`
+- `json_encode(value) -> string`
+- `json_decode(string) -> value`
+- Headers format: `[["Header-Name", "Value"], ...]`
+
+### Encoding
+- `base64_encode(string) -> string`
+- `base64_decode(string) -> string`
+- `url_encode(string) -> string`
+- `url_decode(string) -> string`
+
+### DNS
+- `dns_resolve(hostname) -> ip_string`
+
+### Events
+- `event_register(socket, event_types) -> event_id` (event_types: string or box of strings: `read|write|accept|connect`)
+- `event_unregister(event_id) -> bool`
+- `event_poll() -> [[socket_id, event], ...]`
+- `event_wait(timeout_ms|-1) -> [[socket_id, event], ...]`
+- `event_wait_any(socket_list[, event_types][, timeout_ms|-1]) -> [socket_id, event] | None`
+
+### UDP
+- `udp_bind(address) -> socket` (e.g., "0.0.0.0:9999")
+- `udp_send(socket, data, target_addr) -> bool`
+- `udp_receive(socket, max_bytes) -> [data, source_addr]`
+- `udp_try_receive(socket, max_bytes) -> [data, source_addr] | None`
+- `udp_close(socket) -> bool`
+- `udp_join_multicast(socket, multicast_addr[, interface_addr]) -> bool`
+- `udp_leave_multicast(socket, multicast_addr[, interface_addr]) -> bool`
+- `udp_set_multicast_ttl(socket, ttl:int) -> bool`
+- `udp_set_multicast_loopback(socket, enabled:bool) -> bool`
+- `udp_set_broadcast(socket, enabled:bool) -> bool`
+- `udp_send_broadcast(socket, data, port) -> bytes_sent:int`
+- `udp_send_multicast(socket, data, multicast_addr, port) -> bytes_sent:int`
+- `udp_is_multicast(address) -> bool`
+- `udp_is_broadcast(address) -> bool`
+
+### TLS
+- `tls_connect(host, port) -> tls_connection`
+- `tls_listen(port) -> tls_listener`
+- `tls_accept(tls_listener) -> tls_connection`
+- `tls_send(tls_connection, data) -> bool`
+- `tls_receive(tls_connection, max_bytes) -> string`
+- `tls_try_receive(tls_connection, max_bytes) -> string | None`
+- `tls_close(tls_connection|tls_listener) -> bool`
+
+### WebSockets
+- `ws_connect(url) -> websocket`
+- `ws_send(websocket, text) -> bool`
+- `ws_receive(websocket) -> string`
+- `ws_try_receive(websocket) -> string` (empty string if none)
+- `ws_send_binary(websocket, string_bytes) -> bool`
+- `ws_receive_bytes(websocket) -> [byte:int, ...]`
+- `ws_try_receive_bytes(websocket) -> [byte:int, ...]` (empty if none)
+- `ws_close(websocket) -> bool`
+
+### Raw Sockets & Packets
+- `raw_socket_create(protocol:int) -> raw_socket | "Error: ..."`
+- `raw_socket_set_header_included(raw_socket, included:bool) -> bool`
+- `raw_socket_send(raw_socket, data:string_bytes, target_addr) -> bytes_sent:int`
+- `raw_socket_receive(raw_socket, max_bytes) -> [data:string_bytes, source_addr]`
+- `raw_socket_close(raw_socket) -> bool`
+- `raw_socket_info(raw_socket) -> [protocol:int, protocol_name, header_included:bool]`
+- `packet_build_icmp_echo(id:int, sequence:int, data:string_bytes) -> packet_bytes:string`
+- `packet_build_ipv4_header(source, dest, protocol:int, data_len:int) -> header_bytes:string`
+- `packet_calculate_checksum(data:string_bytes) -> checksum:int`
+
+### Network Interfaces
+- `get_interfaces() -> [name, ...]`
+- `get_interface_info(name) -> [name, type, is_up, is_loopback, is_multicast, mtu, addresses:[[ip, netmask, broadcast|"None"], ...], mac]`
+- `get_interface_stats(name) -> [name, is_up, mtu, address_count, has_ipv4, has_ipv6]`
+- `get_primary_interface() -> name | None`
+- `get_loopback_interface() -> name | None`
+- `get_interfaces_by_type(type) -> [name, ...]` where type ∈ {ethernet, wireless, loopback, tunnel, virtual, unknown}
+- `get_up_interfaces() -> [name, ...]`
+- `get_interface_by_ip(ip) -> name | None`
+- `get_best_interface(dest_host_or_ip) -> name | None`
+
+### IPv6 Helpers & Dual Stack
+- `ipv6_get_dual_stack_mode() -> mode:string`
+- `ipv6_set_dual_stack_mode(mode:string) -> bool`
+- `ipv6_resolve_dual_stack(host) -> [preferred_addr, preferred_family]`
+- `ipv6_parse_address(address) -> [canonical, is_link_local, is_site_local, is_unique_local, is_multicast, is_loopback, is_unspecified, is_global] | Error`
+- `ipv6_get_multicast_address(group) -> [address, scope_id:int, is_multicast:bool]`
+- `ipv6_is_ipv6_address(address) -> bool`
+- `ipv6_is_ipv4_address(address) -> bool`
+- `ipv6_get_address_info(address) -> [canonical, scope_id:int, is_link_local, is_site_local, is_unique_local, is_multicast, is_loopback, is_unspecified, is_global]`
+- `ipv6_get_config() -> [mode, ipv4_enabled:bool, ipv6_enabled:bool]`
+- `ipv6_create_dual_stack_socket(host, port, prefer_ipv6:bool) -> [socket_addr, family, port]`
+
+### Proxy Manager
+- `proxy_set_global(protocol, proxy_type, host, port[, username][, password]) -> bool`
+- `proxy_set_specific(protocol, target_host, target_port, proxy_type, proxy_host, proxy_port[, username][, password]) -> bool`
+- `proxy_set_default(proxy_type, host, port[, username][, password]) -> bool`
+- `proxy_remove_global(protocol) -> bool`
+- `proxy_remove_specific(protocol, target_host, target_port) -> bool`
+- `proxy_add_bypass(host_or_domain) -> bool`
+- `proxy_remove_bypass(host_or_domain) -> bool`
+- `proxy_get_bypass_list() -> [host_or_domain, ...]`
+- `proxy_get_info(protocol[, target_host][, target_port]) -> [proxy_type, host, port, username, source] | None`
+- `proxy_clear_all() -> bool`
+- `proxy_stats() -> [global_count:int, specific_count:int, has_default:bool, bypass_count:int]`
+
+### Timeout Manager
+- `timeout_set_global(protocol, connect_ms, read_ms, write_ms) -> bool`
+- `timeout_set_specific(protocol, host, port, connect_ms, read_ms, write_ms) -> bool`
+- `timeout_get_info(protocol) -> [connect_ms, read_ms, write_ms, source] | None`
+- `timeout_remove(protocol[, host][, port]) -> bool`
+- `timeout_clear() -> bool`
+- `timeout_summary() -> [global_count:int, specific_count:int, default_connect_ms:int, default_read_ms:int, default_write_ms:int]`
+
+### Connection Pool
+- `pool_configure(max_connections:int, max_idle_seconds:int, max_lifetime_seconds:int) -> bool`
+- `pool_clear() -> bool`
+- `pool_stats() -> [total:int, idle:int, active:int]`
+
+### File I/O & Eval
+- `read(filename) -> string`
+- `write(content, filename) -> string`
+- `source(filename) -> value`
+
+### Math Extras
+- `deg(rad) -> degrees`, `rad(deg) -> radians`
+- `sin_deg(x)`, `cos_deg(x)`, `tan_deg(x)` (x in degrees)
+- `atan2(y, x)`, `hypot(a, b)`, `trunc(x)`, `frac(x)`
+- `mod(a, b)`, `div(a:int, b:int)`, `divmod(a:int, b:int) -> [q, r]`
+- `pow_int(base, exponent:int)`
+- `nearly_equal(a, b, eps)`
+- `clamp(x, lo, hi)`
+
+### Vector Math
+- `length([x, y, ...]) -> float`
+- `dot([a...], [b...]) -> float`
+- `sum([x...]) -> float`, `mean([x...]) -> float`
+- `linspace(start, end, n:int) -> [floats...]`
+- `range(start, end, step) -> [ints|floats]`
 
 ---
 

@@ -1,0 +1,6 @@
+# DNS resolution test (requires network access)
+print "=== DNS Resolve Test ==="
+host = "example.com"
+ip = dns_resolve(host)
+print host + " -> " + ip
+

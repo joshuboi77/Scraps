@@ -1,0 +1,94 @@
+# Test file for tensor_set functions
+# This tests both immutable and mutable versions of tensor_set
+
+import("tensor")
+
+print "=== Testing Tensor Set Functions ==="
+
+# Test 1: Create a 2x3 tensor and set some values (immutable version)
+print "Test 1: Testing tensor_set (immutable version)"
+original_tensor = create_tensor(2, 3)
+print "Original tensor:"
+tensor_print(original_tensor)
+
+# Set some values using immutable tensor_set
+tensor1 = tensor_set(original_tensor, 0, 0, 1.0)
+tensor2 = tensor_set(tensor1, 0, 1, 2.0)
+tensor3 = tensor_set(tensor2, 1, 2, 9.0)
+
+print ""
+print "After setting (0,0)=1.0, (0,1)=2.0, (1,2)=9.0:"
+tensor_print(tensor3)
+
+# Verify the values
+val_0_0 = tensor_get(tensor3, 0, 0)
+val_0_1 = tensor_get(tensor3, 0, 1)
+val_1_2 = tensor_get(tensor3, 1, 2)
+val_1_0 = tensor_get(tensor3, 1, 0)  # Should still be 0
+
+print "Verification:"
+print "Element (0,0): " + val_0_0
+print "Element (0,1): " + val_0_1
+print "Element (1,2): " + val_1_2
+print "Element (1,0): " + val_1_0
+
+test (val_0_0 == 1.0)
+test (val_0_1 == 2.0)
+test (val_1_2 == 9.0)
+test (val_1_0 == 0.0)
+
+# Test 2: Verify original tensor is unchanged (immutability test)
+print ""
+print "Test 2: Verifying original tensor is unchanged"
+print "Original tensor after operations:"
+tensor_print(original_tensor)
+original_val = tensor_get(original_tensor, 0, 0)
+print "Original (0,0) value: " + original_val
+test (original_val == 0.0)  # Should still be 0
+
+# Test 3: Test tensor_set_mut (mutable version)
+print ""
+print "Test 3: Testing tensor_set_mut (mutable version)"
+mutable_tensor = create_tensor(2, 2)
+print "Initial mutable tensor:"
+tensor_print(mutable_tensor)
+
+# Set values using mutable version
+result_tensor1 = tensor_set_mut(mutable_tensor, 0, 0, 5.0)
+result_tensor2 = tensor_set_mut(result_tensor1, 1, 1, 7.0)
+
+print ""
+print "After setting (0,0)=5.0, (1,1)=7.0 with tensor_set_mut:"
+tensor_print(result_tensor2)
+
+# Verify values
+mut_val_0_0 = tensor_get(result_tensor2, 0, 0)
+mut_val_1_1 = tensor_get(result_tensor2, 1, 1)
+print "Mutable tensor (0,0): " + mut_val_0_0
+print "Mutable tensor (1,1): " + mut_val_1_1
+
+test (mut_val_0_0 == 5.0)
+test (mut_val_1_1 == 7.0)
+
+# Test 4: Edge case - setting corner elements
+print ""
+print "Test 4: Testing corner elements in 3x3 tensor"
+corner_tensor = create_tensor(3, 3)
+corner_tensor = tensor_set(corner_tensor, 0, 0, 1.0)    # top-left
+corner_tensor = tensor_set(corner_tensor, 0, 2, 2.0)    # top-right
+corner_tensor = tensor_set(corner_tensor, 2, 0, 3.0)    # bottom-left
+corner_tensor = tensor_set(corner_tensor, 2, 2, 4.0)    # bottom-right
+corner_tensor = tensor_set(corner_tensor, 1, 1, 5.0)    # center
+
+print "3x3 tensor with corner and center values set:"
+tensor_print(corner_tensor)
+
+# Verify corner values
+test (tensor_get(corner_tensor, 0, 0) == 1.0)
+test (tensor_get(corner_tensor, 0, 2) == 2.0)
+test (tensor_get(corner_tensor, 2, 0) == 3.0)
+test (tensor_get(corner_tensor, 2, 2) == 4.0)
+test (tensor_get(corner_tensor, 1, 1) == 5.0)
+
+print ""
+print "=== All tensor set tests passed! ✅ ==="

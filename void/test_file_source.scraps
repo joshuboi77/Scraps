@@ -1,0 +1,12 @@
+# File I/O and source() tests (writes inside void/)
+print "=== File I/O & source ==="
+tmp = "void/tmp_hello.txt"
+write("Hello Scraps!") -> tmp
+content = read <- tmp
+print content
+
+modfile = "void/tmp_mod.scraps"
+write("fn(use()) { 42 } -> forty_two") -> modfile
+val = source(modfile)
+print val
+print result(forty_two)
