@@ -1700,6 +1700,30 @@ fn execute_function(
                     }
                 }
             }
+            OpCode::Assert => {
+                // Pop condition and assert truthiness
+                let cond = local_stack.pop().ok_or("ASSERT: missing value")?;
+                match cond {
+                    Value::Bool(true) => { /* ok */ }
+                    Value::Bool(false) => {
+                        // Include contextual info if available
+                        let proxy_ctx = context.map(|c| ExecutionContext {
+                            source_file: c.source_file.clone(),
+                            current_line: local_line,
+                            instruction_index: ip,
+                        });
+                        return Err(format_error_with_context(proxy_ctx.as_ref(), "TEST failed: condition evaluated to FALSE"));
+                    }
+                    other => {
+                        let proxy_ctx = context.map(|c| ExecutionContext {
+                            source_file: c.source_file.clone(),
+                            current_line: local_line,
+                            instruction_index: ip,
+                        });
+                        return Err(format_error_with_context(proxy_ctx.as_ref(), &format!("TEST failed: non-boolean value: {:?}", other)));
+                    }
+                }
+            }
             
             OpCode::StoreVar(name) => {
                 let val = local_stack.pop().expect("Nothing to store");
@@ -5907,6 +5931,19 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                             }
                             _ => return Err(format!("'{}' is not a function", func_name)),
                         }
+                    }
+                }
+            }
+            OpCode::Assert => {
+                // Assert at top-level context
+                let cond = stack.pop().ok_or("ASSERT: missing value")?;
+                match cond {
+                    Value::Bool(true) => { /* ok */ }
+                    Value::Bool(false) => {
+                        return Err(format_error_with_context(Some(&context), "TEST failed: condition evaluated to FALSE"));
+                    }
+                    other => {
+                        return Err(format_error_with_context(Some(&context), &format!("TEST failed: non-boolean value: {:?}", other)));
                     }
                 }
             }

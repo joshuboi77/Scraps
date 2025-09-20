@@ -254,16 +254,19 @@ WHILE ((i < count(items)) |< (found == FALSE)) {
 
 ### TEST Assertions
 ```scraps
-# Test assertions for validation (current behavior prints TRUE/FALSE)
+# Test assertions for validation (halts on failure)
 x = 42
-test (x == 42)        # prints TRUE
-test (x > 50)         # prints FALSE (no error)
+test (x == 42)        # OK
+test (x > 50)         # Fails: halts with error pointing to line
 
 # Use in testing and validation
 result = calculate_something()
-test (result > 0)     # prints TRUE/FALSE
+test (result > 0)     # Halts with clear error if FALSE or non-boolean
 ```
-Note: At present, `test` prints the boolean result and does not halt execution on failure.
+Behavior:
+- Evaluates the expression; if it is `TRUE`, execution continues.
+- If `FALSE`, execution halts with: `TEST failed: condition evaluated to FALSE (at file:line)`.
+- If the expression is not boolean, execution halts with: `TEST failed: non-boolean value: <value>` and context.
 
 ---
 

@@ -52,9 +52,9 @@ impl Compiler {
             }
             
             Stmt::Test(expr) => {
+                // Compile the condition expression, then assert it
                 self.compile_expression(expr);
-                // TODO: Implement test statement (print TRUE/FALSE)
-                self.program.push(OpCode::Print);
+                self.program.push(OpCode::Assert);
             }
             
             Stmt::Expression(expr) => {

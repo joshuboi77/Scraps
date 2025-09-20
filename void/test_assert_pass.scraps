@@ -1,0 +1,7 @@
+# Should pass and continue
+print "=== TEST assert pass ==="
+x = 5
+test (x == 5)
+test (x < 10)
+print "all good"
+

@@ -61,6 +61,7 @@ pub enum OpCode {
     
     // I/O and utilities
     Print,
+    Assert, // assert top-of-stack boolean; fail if false or non-boolean
     Halt,
     
     // Network I/O - TCP Sockets
