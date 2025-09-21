@@ -13,3 +13,4 @@ tungstenite = { version = "0.20", features = ["native-tls"] }
 url = "2"
 native-tls = "0.2"
 libc = "0.2"
+unicode-width = "0.1"

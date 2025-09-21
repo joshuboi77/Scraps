@@ -118,7 +118,19 @@ fn main() {
                     
                     if let Err(e) = vm::run_with_context(&bytecode, Some(filename), 0) {
                         eprintln!("Runtime error: {}", e);
-                        eprintln!("Tip: Check your array indices and make sure they're within bounds");
+                        // Context-aware hints (first pass)
+                        let hint = if e.contains("UNPACK") || e.contains("index out of bounds") {
+                            Some("Check indices/slice bounds for boxes and strings")
+                        } else if e.starts_with("HTTP_") || e.starts_with("URL_") || e.contains("DNS_") {
+                            Some("Verify arguments and network connectivity (URL/headers/DNS)")
+                        } else if e.starts_with("JSON_") {
+                            Some("Ensure value is JSON-encodable or input is valid JSON")
+                        } else if e.starts_with("READ") || e.starts_with("WRITE") || e.starts_with("SOURCE") {
+                            Some("Check file path and permissions")
+                        } else if e.contains("TEST failed") {
+                            Some("Log intermediate values; confirm the condition is boolean and true")
+                        } else { None };
+                        if let Some(h) = hint { eprintln!("Tip: {}", h); }
                     }
                 }
                 Err(e) => eprintln!("Parser error: {}", e),

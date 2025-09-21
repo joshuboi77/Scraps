@@ -1,0 +1,6 @@
+# Division by zero hazard demo
+
+print "=== Division by zero ==="
+x = 1 / 0
+print x
+

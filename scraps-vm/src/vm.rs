@@ -24,6 +24,56 @@ use serde_json::{self, Value as JsonValue, Number as JsonNumber};
 // std::time and std::thread imports removed as they're unused
 use base64::{engine::general_purpose, Engine as _};
 use urlencoding;
+use std::cell::RefCell;
+use unicode_width::UnicodeWidthStr;
+use std::env;
+
+#[derive(Debug, Clone)]
+struct CallFrame {
+    name: String,
+    file: Option<String>,
+    line: usize,
+}
+
+thread_local! {
+    static CALL_STACK: RefCell<Vec<CallFrame>> = RefCell::new(Vec::new());
+    static TRACE_INIT: RefCell<bool> = RefCell::new(false);
+    static TRACE_STEP: RefCell<usize> = RefCell::new(0);
+    // Unified memory/event note for the trace's third column
+    static TRACE_MEM_NOTE: RefCell<Option<String>> = RefCell::new(None);
+}
+
+// Error/argument helpers (first pass)
+fn err_arity(fname: &str, got: usize, expect_text: &str) -> String {
+    format!("{} expects {} (got {})", fname, expect_text, got)
+}
+
+fn ensure_arity_one_of(fname: &str, arg_count: usize, allowed: &[usize], sig: &str) -> Result<(), String> {
+    if allowed.iter().any(|&n| n == arg_count) { return Ok(()); }
+    let expect_text = if allowed.len() == 1 {
+        format!("exactly {} argument{}", allowed[0], if allowed[0]==1 {""} else {"s"})
+    } else if allowed.len() == 2 {
+        format!("{} or {} arguments {}", allowed[0], allowed[1], sig)
+    } else {
+        format!("one of {:?} arguments {}", allowed, sig)
+    };
+    Err(err_arity(fname, arg_count, &expect_text))
+}
+
+fn pop_string_arg(stack: &mut Vec<Value>, fname: &str, label: &str) -> Result<String, String> {
+    let v = stack.pop().ok_or_else(|| format!("{} missing {}", fname, label))?;
+    match v { Value::Str(s) => Ok(s), _ => Err(format!("{} {} must be a string", fname, label)) }
+}
+
+#[allow(dead_code)]
+fn pop_usize_arg(stack: &mut Vec<Value>, fname: &str, label: &str) -> Result<usize, String> {
+    let v = stack.pop().ok_or_else(|| format!("{} missing {}", fname, label))?;
+    match v {
+        Value::Int(n) if n >= 0 => Ok(n as usize),
+        Value::Float(f) if f >= 0.0 => Ok(f as usize),
+        _ => Err(format!("{} {} must be a non-negative number", fname, label)),
+    }
+}
 
 #[derive(Debug, Clone)]
 struct ExecutionContext {
@@ -35,7 +85,7 @@ struct ExecutionContext {
 const REWIRED_KEY: &str = "__rewired__";
 
 fn format_error_with_context(context: Option<&ExecutionContext>, message: &str) -> String {
-    if let Some(context) = context {
+    let mut base = if let Some(context) = context {
         if let Some(ref file) = context.source_file {
             format!("{} (at {}:{}: instruction {})", message, file, context.current_line, context.instruction_index)
         } else {
@@ -43,7 +93,24 @@ fn format_error_with_context(context: Option<&ExecutionContext>, message: &str) 
         }
     } else {
         message.to_string()
-    }
+    };
+
+    // Append a basic call stack trace if available
+    CALL_STACK.with(|cs| {
+        let stack = cs.borrow();
+        if !stack.is_empty() {
+            base.push_str("\nStack:");
+            for frame in stack.iter().rev() {
+                if let Some(ref f) = frame.file {
+                    base.push_str(&format!("\n  at {} ({}:{})", frame.name, f, frame.line));
+                } else {
+                    base.push_str(&format!("\n  at {}", frame.name));
+                }
+            }
+        }
+    });
+
+    base
 }
 
 static TCP_MANAGER_GLOBAL: OnceLock<Mutex<TcpSocketManager>> = OnceLock::new();
@@ -100,6 +167,176 @@ fn interface_manager_global() -> &'static Mutex<NetworkInterfaceManager> {
 
 fn ipv6_manager_global() -> &'static Mutex<IPv6Manager> {
     IPV6_MANAGER_GLOBAL.get_or_init(|| Mutex::new(IPv6Manager::new()))
+}
+
+// Error/argument helpers (first pass)
+fn push_call_frame(name: &str, file: Option<String>, line: usize) {
+    CALL_STACK.with(|cs| cs.borrow_mut().push(CallFrame { name: name.to_string(), file, line }));
+}
+
+fn pop_call_frame() {
+    CALL_STACK.with(|cs| { let _ = cs.borrow_mut().pop(); });
+}
+
+fn trace_enabled() -> bool {
+    match env::var("SCRAPS_TRACE") {
+        Ok(val) => val.to_ascii_lowercase().contains("mini"),
+        Err(_) => false,
+    }
+}
+
+fn set_trace_mem<S: Into<String>>(note: S) {
+    TRACE_MEM_NOTE.with(|tb| { *tb.borrow_mut() = Some(note.into()); });
+}
+
+fn get_trace_mem_note() -> Option<String> {
+    TRACE_MEM_NOTE.with(|tb| tb.borrow().clone())
+}
+
+fn opcode_summary(op: &OpCode) -> String {
+    match op {
+        OpCode::PushInt(n) => format!("push {}", n),
+        OpCode::PushFloat(f) => format!("push {}", f),
+        OpCode::PushBool(b) => format!("push {}", if *b {"TRUE"} else {"FALSE"}),
+        OpCode::PushStr(s) => {
+            let mut t = s.clone();
+            if t.len() > 12 { t.truncate(12); t.push_str("…"); }
+            format!("push \"{}\"", t)
+        }
+        OpCode::MakeBox => "makebox".to_string(),
+        OpCode::Pack => "pack".to_string(),
+        OpCode::Place(i) => format!("place {}", i),
+        OpCode::Unpack(_) => "unpack".to_string(),
+        OpCode::Pick(_) => "pick".to_string(),
+        OpCode::Add => "add".to_string(),
+        OpCode::Sub => "sub".to_string(),
+        OpCode::Mul => "mul".to_string(),
+        OpCode::Div => "div".to_string(),
+        OpCode::Lt => "lt".to_string(),
+        OpCode::Gt => "gt".to_string(),
+        OpCode::Le => "le".to_string(),
+        OpCode::Ge => "ge".to_string(),
+        OpCode::Eq => "eq".to_string(),
+        OpCode::Ne => "ne".to_string(),
+        OpCode::And => "and".to_string(),
+        OpCode::Or => "or".to_string(),
+        OpCode::Not => "not".to_string(),
+        OpCode::LoadVar(n) => format!("load {}", n),
+        OpCode::StoreVar(n) => format!("store {}", n),
+        OpCode::Call(_, n) => format!("call {}", n),
+        OpCode::Label(s) => format!("label {}", s),
+        OpCode::Jump(_) => "jump".to_string(),
+        OpCode::JumpIfNot(_) => "jump_if_not".to_string(),
+        OpCode::Print => "print".to_string(),
+        OpCode::Assert => "assert".to_string(),
+        _ => "op".to_string(),
+    }
+}
+
+const COL_IP_WIDTH: usize = 3;
+const COL_OPCODE_WIDTH: usize = 12;
+const COL_STACK_WIDTH: usize = 25;
+const COL_MEM_WIDTH: usize = 24;
+const VAL_ITEM_MAX: usize = 10;
+
+// Inter-column gap constants for trace output
+const GAP_IP_OP: usize = 2;       // spaces between IP and opcode
+const GAP_OP_STACK: usize = 4;    // spaces between opcode and value stack
+const GAP_STACK_MEM: usize = 4;   // spaces between value stack and memory
+
+fn display_width(s: &str) -> usize { UnicodeWidthStr::width(s) }
+
+fn clamp_display(s: &str, max: usize) -> String {
+    if display_width(s) <= max { return s.to_string(); }
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let mut buf = [0u8; 4];
+        let cw = UnicodeWidthStr::width(ch.encode_utf8(&mut buf));
+        if w + cw >= max { break; }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
+fn pad_left_vis(s: &str, width: usize) -> String {
+    let w = display_width(s);
+    if w >= width { s.to_string() } else { " ".repeat(width - w) + s }
+}
+
+fn pad_right_vis(s: &str, width: usize) -> String {
+    let w = display_width(s);
+    if w >= width { s.to_string() } else { s.to_string() + &" ".repeat(width - w) }
+}
+
+fn shorten(s: &str, max: usize) -> String { clamp_display(s, max) }
+
+fn format_stack_brief(stack: &Vec<Value>) -> String {
+    let items: Vec<String> = stack
+        .iter()
+        .map(|v| clamp_display(&v.format_for_display(), VAL_ITEM_MAX))
+        .collect();
+    let mut out = format!("[{}]", items.join(", "));
+    if display_width(&out) > COL_STACK_WIDTH { out = clamp_display(&out, COL_STACK_WIDTH); }
+    out
+}
+
+fn trace_mini_row(ip: usize, instr: &OpCode, stack: &Vec<Value>, red: bool, _note: Option<&str>) {
+    if !trace_enabled() { return; }
+    TRACE_INIT.with(|ti| {
+        let mut init = ti.borrow_mut();
+        if !*init {
+            let gap_ip_op = " ".repeat(GAP_IP_OP);
+            let gap_op_stack = " ".repeat(GAP_OP_STACK);
+            let gap_stack_mem = " ".repeat(GAP_STACK_MEM);
+            let header = format!(
+                "{}{}{}{}{}{}{}",
+                pad_left_vis("ip", COL_IP_WIDTH),
+                gap_ip_op,
+                pad_right_vis("opcode", COL_OPCODE_WIDTH),
+                gap_op_stack,
+                pad_right_vis("Value stack", COL_STACK_WIDTH),
+                gap_stack_mem,
+                pad_right_vis("Memory", COL_MEM_WIDTH),
+            );
+            println!("{}", header);
+            let total = COL_IP_WIDTH
+                + GAP_IP_OP
+                + COL_OPCODE_WIDTH
+                + GAP_OP_STACK
+                + COL_STACK_WIDTH
+                + GAP_STACK_MEM
+                + COL_MEM_WIDTH;
+            println!("{}", "-".repeat(total));
+            *init = true;
+        }
+    });
+    let op_full = opcode_summary(instr);
+    let op_col = pad_right_vis(&clamp_display(&op_full, COL_OPCODE_WIDTH), COL_OPCODE_WIDTH);
+
+    let v_plain = format_stack_brief(stack);
+    let v_col_plain = pad_right_vis(&clamp_display(&v_plain, COL_STACK_WIDTH), COL_STACK_WIDTH);
+    let v_col = if red { format!("\x1b[31m{}\x1b[0m", v_col_plain) } else { v_col_plain };
+
+    let mem_raw = get_trace_mem_note().unwrap_or_else(|| "-".to_string());
+    let mem_col = pad_right_vis(&clamp_display(&mem_raw, COL_MEM_WIDTH), COL_MEM_WIDTH);
+
+    let ip_col = pad_left_vis(&ip.to_string(), COL_IP_WIDTH);
+    let gap_ip_op = " ".repeat(GAP_IP_OP);
+    let gap_op_stack = " ".repeat(GAP_OP_STACK);
+    let gap_stack_mem = " ".repeat(GAP_STACK_MEM);
+    println!("{}{}{}{}{}{}{}", ip_col, gap_ip_op, op_col, gap_op_stack, v_col, gap_stack_mem, mem_col);
+}
+
+fn trace_mini(ip: usize, instr: &OpCode, stack: &Vec<Value>) {
+    trace_mini_row(ip, instr, stack, false, None);
+}
+
+fn trace_hazard(ip: usize, instr: &OpCode, stack: &Vec<Value>, _msg: &str) {
+    if !trace_enabled() { return; }
+    trace_mini_row(ip, instr, stack, true, None);
 }
 
 fn parse_headers_box(val: Value) -> Result<Vec<(String, String)>, String> {
@@ -460,6 +697,7 @@ fn execute_function(
             // Variables
             OpCode::LoadVar(name) => {
                 if let Some(val) = local_env.get(name) {
+                    set_trace_mem(format!("load {}", name));
                     // Ensure deep cloning of boxes to maintain immutability
                     let cloned_val = match val {
                         Value::Box(contents) => {
@@ -560,28 +798,29 @@ fn execute_function(
                                 }
                             }
                             if start_idx < 0 || start_idx >= contents.len() as i64 {
+                                // Hazard
+                                let msg = format!("UNPACK: index out of bounds - tried to access index {} but array has length {} (contents: {:?})", start_idx, contents.len(), contents);
+                                trace_hazard(ip + 1, instr, &local_stack, &msg);
                                 // Use a proxy context with updated line and local ip
                                 let proxy_ctx = context.map(|c| ExecutionContext {
                                     source_file: c.source_file.clone(),
                                     current_line: local_line,
                                     instruction_index: ip,
                                 });
-                                return Err(format_error_with_context(proxy_ctx.as_ref(), &format!(
-                                    "UNPACK: index out of bounds - tried to access index {} but array has length {} (contents: {:?})",
-                                    start_idx, contents.len(), contents)));
+                                return Err(format_error_with_context(proxy_ctx.as_ref(), &msg));
                             }
                             local_stack.push(contents[start_idx as usize].clone());
                         } else {
                             let end = end_idx.unwrap();
                             if start_idx < 0 || end < start_idx || end > contents.len() as i64 {
+                                let msg = format!("UNPACK: slice out of bounds - tried to slice from {} to {} but array has length {} (contents: {:?})", start_idx, end, contents.len(), contents);
+                                trace_hazard(ip + 1, instr, &local_stack, &msg);
                                 let proxy_ctx = context.map(|c| ExecutionContext {
                                     source_file: c.source_file.clone(),
                                     current_line: local_line,
                                     instruction_index: ip,
                                 });
-                                return Err(format_error_with_context(proxy_ctx.as_ref(), &format!(
-                                    "UNPACK: slice out of bounds - tried to slice from {} to {} but array has length {} (contents: {:?})",
-                                    start_idx, end, contents.len(), contents)));
+                                return Err(format_error_with_context(proxy_ctx.as_ref(), &msg));
                             }
                             let slice = contents[start_idx as usize..end as usize].to_vec();
                             local_stack.push(Value::Box(slice));
@@ -590,28 +829,28 @@ fn execute_function(
                     Value::Str(s) => {
                         if end_idx.is_none() {
                             if start_idx < 0 || start_idx >= s.len() as i64 {
+                                let msg = format!("UNPACK: index out of bounds - tried to access index {} but string has length {} (contents: {:?})", start_idx, s.len(), s);
+                                trace_hazard(ip + 1, instr, &local_stack, &msg);
                                 let proxy_ctx = context.map(|c| ExecutionContext {
                                     source_file: c.source_file.clone(),
                                     current_line: local_line,
                                     instruction_index: ip,
                                 });
-                                return Err(format_error_with_context(proxy_ctx.as_ref(), &format!(
-                                    "UNPACK: index out of bounds - tried to access index {} but string has length {} (contents: {:?})",
-                                    start_idx, s.len(), s)));
+                                return Err(format_error_with_context(proxy_ctx.as_ref(), &msg));
                             }
                             let ch = s.chars().nth(start_idx as usize).unwrap();
                             local_stack.push(Value::Str(ch.to_string()));
                         } else {
                             let end = end_idx.unwrap();
                             if start_idx < 0 || end < start_idx || end > s.len() as i64 {
+                                let msg = format!("UNPACK: slice out of bounds - tried to slice from {} to {} but string has length {} (contents: {:?})", start_idx, end, s.len(), s);
+                                trace_hazard(ip + 1, instr, &local_stack, &msg);
                                 let proxy_ctx = context.map(|c| ExecutionContext {
                                     source_file: c.source_file.clone(),
                                     current_line: local_line,
                                     instruction_index: ip,
                                 });
-                                return Err(format_error_with_context(proxy_ctx.as_ref(), &format!(
-                                    "UNPACK: slice out of bounds - tried to slice from {} to {} but string has length {} (contents: {:?})",
-                                    start_idx, end, s.len(), s)));
+                                return Err(format_error_with_context(proxy_ctx.as_ref(), &msg));
                             }
                             let slice: String = s.chars().skip(start_idx as usize).take((end - start_idx) as usize).collect();
                             local_stack.push(Value::Str(slice));
@@ -638,12 +877,12 @@ fn execute_function(
                         if indices.is_empty() { return Err("PICK: expects at least one index".to_string()); }
                         if indices.len() == 1 {
                             let idx = indices[0];
-                            if idx < 0 || idx >= list.len() as i64 { return Err(format!("PICK: index {} out of bounds", idx)); }
+                            if idx < 0 || idx >= list.len() as i64 { let msg = format!("PICK: index {} out of bounds", idx); trace_hazard(ip + 1, instr, &local_stack, &msg); return Err(msg); }
                             local_stack.push(list[idx as usize].clone());
                         } else {
                             let mut out = Vec::with_capacity(indices.len());
                             for idx in indices {
-                                if idx < 0 || idx >= list.len() as i64 { return Err(format!("PICK: index {} out of bounds", idx)); }
+                                if idx < 0 || idx >= list.len() as i64 { let msg = format!("PICK: index {} out of bounds", idx); trace_hazard(ip + 1, instr, &local_stack, &msg); return Err(msg); }
                                 out.push(list[idx as usize].clone());
                             }
                             local_stack.push(Value::Box(out));
@@ -653,13 +892,13 @@ fn execute_function(
                         if indices.is_empty() { return Err("PICK: expects at least one index".to_string()); }
                         if indices.len() == 1 {
                             let idx = indices[0];
-                            if idx < 0 || idx >= s.len() as i64 { return Err(format!("PICK: index {} out of bounds", idx)); }
+                            if idx < 0 || idx >= s.len() as i64 { let msg = format!("PICK: index {} out of bounds", idx); trace_hazard(ip + 1, instr, &local_stack, &msg); return Err(msg); }
                             let ch = s.chars().nth(idx as usize).unwrap();
                             local_stack.push(Value::Str(ch.to_string()));
                         } else {
                             let mut out = String::new();
                             for idx in indices {
-                                if idx < 0 || idx >= s.len() as i64 { return Err(format!("PICK: index {} out of bounds", idx)); }
+                                if idx < 0 || idx >= s.len() as i64 { let msg = format!("PICK: index {} out of bounds", idx); trace_hazard(ip + 1, instr, &local_stack, &msg); return Err(msg); }
                                 if let Some(ch) = s.chars().nth(idx as usize) { out.push(ch); }
                             }
                             local_stack.push(Value::Str(out));
@@ -675,7 +914,9 @@ fn execute_function(
                 match target {
                     Value::Box(mut contents) => {
                         contents.push(item);
-                        local_stack.push(Value::Box(contents));
+                        let vb = Value::Box(contents);
+                        set_trace_mem(format!("box: {}", shorten(&vb.format_for_display(), 20)));
+                        local_stack.push(vb);
                     }
                     _ => return Err("Pack target was not a box".to_string()),
                 }
@@ -689,6 +930,7 @@ fn execute_function(
                         inner.resize(idx + 1, Value::None);
                     }
                     inner[idx] = value;
+                    set_trace_mem(format!("place idx={} -> {}", idx, shorten(&Value::Box(inner.clone()).format_for_display(), 20)));
                     local_stack.push(target);
                 } else {
                     return Err("PLACE target is not a box".to_string());
@@ -702,13 +944,9 @@ fn execute_function(
                 match func_name.as_str() {
                     "box" => { if *arg_count != 0 { return Err("BOX expects 0 arguments".to_string()); } local_stack.push(Value::Box(vec![])); }
                     "http_get" => {
-                        if *arg_count < 1 || *arg_count > 2 { return Err("HTTP_GET expects 1 or 2 arguments (url[, headers])".to_string()); }
-                        let url_val = local_stack.pop().expect("Expected URL for HTTP_GET");
-                        let url = match url_val { Value::Str(s) => s, _ => return Err("HTTP_GET url must be a string".to_string()) };
-                        let headers = if *arg_count == 2 {
-                            let headers_val = local_stack.pop().expect("Expected headers for HTTP_GET");
-                            Some(parse_headers_box(headers_val)?)
-                        } else { None };
+                        ensure_arity_one_of("HTTP_GET", *arg_count, &[1,2], "(url[, headers])")?;
+                        let url = pop_string_arg(&mut local_stack, "HTTP_GET", "url")?;
+                        let headers = if *arg_count == 2 { Some(parse_headers_box(local_stack.pop().unwrap())?) } else { None };
                         let (status, hs, body) = http_get_impl(&url, headers.as_deref())?;
                         let resp = Value::Box(vec![
                             Value::Int(status),
@@ -718,30 +956,24 @@ fn execute_function(
                         local_stack.push(resp);
                     }
                     "json_encode" => {
-                        if *arg_count != 1 { return Err("JSON_ENCODE expects exactly 1 argument".to_string()); }
-                        let val = local_stack.pop().expect("Expected value for JSON_ENCODE");
+                        ensure_arity_one_of("JSON_ENCODE", *arg_count, &[1], "")?;
+                        let val = local_stack.pop().unwrap();
                         let j = value_to_json(&val)?;
                         let s = serde_json::to_string(&j).map_err(|e| format!("JSON_ENCODE error: {}", e))?;
                         local_stack.push(Value::Str(s));
                     }
                     "json_decode" => {
-                        if *arg_count != 1 { return Err("JSON_DECODE expects exactly 1 argument".to_string()); }
-                        let sval = local_stack.pop().expect("Expected string for JSON_DECODE");
-                        let s = match sval { Value::Str(s) => s, _ => return Err("JSON_DECODE argument must be a string".to_string()) };
+                        ensure_arity_one_of("JSON_DECODE", *arg_count, &[1], "")?;
+                        let s = pop_string_arg(&mut local_stack, "JSON_DECODE", "input")?;
                         let j: JsonValue = serde_json::from_str(&s).map_err(|e| format!("JSON_DECODE error: {}", e))?;
                         let v = json_to_value(&j);
                         local_stack.push(v);
                     }
                     "http_post" => {
-                        if *arg_count < 2 || *arg_count > 3 { return Err("HTTP_POST expects 2 or 3 arguments (url, data[, headers])".to_string()); }
-                        let headers = if *arg_count == 3 {
-                            let headers_val = local_stack.pop().expect("Expected headers for HTTP_POST");
-                            Some(parse_headers_box(headers_val)?)
-                        } else { None };
-                        let data_val = local_stack.pop().expect("Expected data for HTTP_POST");
-                        let url_val = local_stack.pop().expect("Expected URL for HTTP_POST");
-                        let url = match url_val { Value::Str(s) => s, _ => return Err("HTTP_POST url must be a string".to_string()) };
-                        let data = match data_val { Value::Str(s) => s, _ => return Err("HTTP_POST data must be a string".to_string()) };
+                        ensure_arity_one_of("HTTP_POST", *arg_count, &[2,3], "(url, data[, headers])")?;
+                        let headers = if *arg_count == 3 { Some(parse_headers_box(local_stack.pop().unwrap())?) } else { None };
+                        let data = pop_string_arg(&mut local_stack, "HTTP_POST", "data")?;
+                        let url = pop_string_arg(&mut local_stack, "HTTP_POST", "url")?;
                         let (status, hs, body) = http_post_impl(&url, &data, headers.as_deref())?;
                         let resp = Value::Box(vec![
                             Value::Int(status),
@@ -751,15 +983,10 @@ fn execute_function(
                         local_stack.push(resp);
                     }
                     "http_put" => {
-                        if *arg_count < 2 || *arg_count > 3 { return Err("HTTP_PUT expects 2 or 3 arguments (url, data[, headers])".to_string()); }
-                        let headers = if *arg_count == 3 {
-                            let headers_val = local_stack.pop().expect("Expected headers for HTTP_PUT");
-                            Some(parse_headers_box(headers_val)?)
-                        } else { None };
-                        let data_val = local_stack.pop().expect("Expected data for HTTP_PUT");
-                        let url_val = local_stack.pop().expect("Expected URL for HTTP_PUT");
-                        let url = match url_val { Value::Str(s) => s, _ => return Err("HTTP_PUT url must be a string".to_string()) };
-                        let data = match data_val { Value::Str(s) => s, _ => return Err("HTTP_PUT data must be a string".to_string()) };
+                        ensure_arity_one_of("HTTP_PUT", *arg_count, &[2,3], "(url, data[, headers])")?;
+                        let headers = if *arg_count == 3 { Some(parse_headers_box(local_stack.pop().unwrap())?) } else { None };
+                        let data = pop_string_arg(&mut local_stack, "HTTP_PUT", "data")?;
+                        let url = pop_string_arg(&mut local_stack, "HTTP_PUT", "url")?;
                         let (status, hs, body) = http_put_impl(&url, &data, headers.as_deref())?;
                         let resp = Value::Box(vec![ Value::Int(status), headers_to_value(&hs), Value::Str(body) ]);
                         local_stack.push(resp);
@@ -780,27 +1007,21 @@ fn execute_function(
                         local_stack.push(Value::Str(out));
                     }
                     "url_encode" => {
-                        if *arg_count != 1 { return Err("URL_ENCODE expects exactly 1 argument".to_string()); }
-                        let sval = local_stack.pop().expect("Expected string for URL_ENCODE");
-                        let s = match sval { Value::Str(s) => s, _ => return Err("URL_ENCODE argument must be a string".to_string()) };
+                        ensure_arity_one_of("URL_ENCODE", *arg_count, &[1], "")?;
+                        let s = pop_string_arg(&mut local_stack, "URL_ENCODE", "string")?;
                         let out = urlencoding::encode(&s).into_owned();
                         local_stack.push(Value::Str(out));
                     }
                     "url_decode" => {
-                        if *arg_count != 1 { return Err("URL_DECODE expects exactly 1 argument".to_string()); }
-                        let sval = local_stack.pop().expect("Expected string for URL_DECODE");
-                        let s = match sval { Value::Str(s) => s, _ => return Err("URL_DECODE argument must be a string".to_string()) };
+                        ensure_arity_one_of("URL_DECODE", *arg_count, &[1], "")?;
+                        let s = pop_string_arg(&mut local_stack, "URL_DECODE", "string")?;
                         let out = urlencoding::decode(&s).map_err(|e| format!("URL_DECODE error: {}", e))?.into_owned();
                         local_stack.push(Value::Str(out));
                     }
                     "http_delete" => {
-                        if *arg_count < 1 || *arg_count > 2 { return Err("HTTP_DELETE expects 1 or 2 arguments (url[, headers])".to_string()); }
-                        let url_val = local_stack.pop().expect("Expected URL for HTTP_DELETE");
-                        let url = match url_val { Value::Str(s) => s, _ => return Err("HTTP_DELETE url must be a string".to_string()) };
-                        let headers = if *arg_count == 2 {
-                            let headers_val = local_stack.pop().expect("Expected headers for HTTP_DELETE");
-                            Some(parse_headers_box(headers_val)?)
-                        } else { None };
+                        ensure_arity_one_of("HTTP_DELETE", *arg_count, &[1,2], "(url[, headers])")?;
+                        let url = pop_string_arg(&mut local_stack, "HTTP_DELETE", "url")?;
+                        let headers = if *arg_count == 2 { Some(parse_headers_box(local_stack.pop().unwrap())?) } else { None };
                         let (status, hs, body) = http_delete_impl(&url, headers.as_deref())?;
                         let resp = Value::Box(vec![ Value::Int(status), headers_to_value(&hs), Value::Str(body) ]);
                         local_stack.push(resp);
@@ -907,7 +1128,12 @@ fn execute_function(
                                 // Execute the factory in a cloned environment to collect its definitions
                                 let mut module_env = local_env.clone();
                                 let mut tmp_stack: Vec<Value> = Vec::new();
-                                let _ = execute_function(&body, &mut tmp_stack, &mut module_env, context)?;
+                                // Push call frame for stack trace
+                                let file = context.and_then(|c| c.source_file.clone());
+                                push_call_frame(&name, file, local_line);
+                                let res = execute_function(&body, &mut tmp_stack, &mut module_env, context);
+                                pop_call_frame();
+                                let _ = res?;
                                 // Diff module_env against env to get new/changed definitions
                                 let mut exports = HashMap::new();
                                 for (key, value) in module_env.iter() {
@@ -978,16 +1204,29 @@ fn execute_function(
                         
                         let ptr: u64 = match ptr_val { 
                             Value::Int(n) => n as u64, 
-                            _ => return Err("MEM_LOAD ptr must be an integer".to_string()) 
+                            _ => {
+                                let temp = OpCode::Call("mem_load".to_string(), *arg_count);
+                                trace_hazard(ip + 1, &temp, &local_stack, "MEM_LOAD ptr must be an integer");
+                                let proxy_ctx = context.map(|c| ExecutionContext { source_file: c.source_file.clone(), current_line: local_line, instruction_index: ip });
+                                return Err(format_error_with_context(proxy_ctx.as_ref(), "MEM_LOAD ptr must be an integer"));
+                            } 
                         };
                         let width: u8 = match width_val { 
                             Value::Int(n) => {
                                 if n < 1 || n > 8 || (n != 1 && n != 2 && n != 4 && n != 8) {
-                                    return Err("MEM_LOAD width must be 1, 2, 4, or 8".to_string());
+                                    let temp = OpCode::Call("mem_load".to_string(), *arg_count);
+                                    trace_hazard(ip + 1, &temp, &local_stack, "MEM_LOAD width must be 1, 2, 4, or 8");
+                                    let proxy_ctx = context.map(|c| ExecutionContext { source_file: c.source_file.clone(), current_line: local_line, instruction_index: ip });
+                                    return Err(format_error_with_context(proxy_ctx.as_ref(), "MEM_LOAD width must be 1, 2, 4, or 8"));
                                 }
                                 n as u8
                             }, 
-                            _ => return Err("MEM_LOAD width must be an integer".to_string()) 
+                            _ => {
+                                let temp = OpCode::Call("mem_load".to_string(), *arg_count);
+                                trace_hazard(ip + 1, &temp, &local_stack, "MEM_LOAD width must be an integer");
+                                let proxy_ctx = context.map(|c| ExecutionContext { source_file: c.source_file.clone(), current_line: local_line, instruction_index: ip });
+                                return Err(format_error_with_context(proxy_ctx.as_ref(), "MEM_LOAD width must be an integer"));
+                            } 
                         };
                         
                         // Simulate memory load - in real implementation this would be actual memory access
@@ -1010,20 +1249,38 @@ fn execute_function(
                         
                         let _ptr: u64 = match ptr_val { 
                             Value::Int(n) => n as u64, 
-                            _ => return Err("MEM_STORE ptr must be an integer".to_string()) 
+                            _ => {
+                                let temp = OpCode::Call("mem_store".to_string(), *arg_count);
+                                trace_hazard(ip + 1, &temp, &local_stack, "MEM_STORE ptr must be an integer");
+                                let proxy_ctx = context.map(|c| ExecutionContext { source_file: c.source_file.clone(), current_line: local_line, instruction_index: ip });
+                                return Err(format_error_with_context(proxy_ctx.as_ref(), "MEM_STORE ptr must be an integer"));
+                            } 
                         };
                         let val: i64 = match val_val { 
                             Value::Int(n) => n, 
-                            _ => return Err("MEM_STORE val must be an integer".to_string()) 
+                            _ => {
+                                let temp = OpCode::Call("mem_store".to_string(), *arg_count);
+                                trace_hazard(ip + 1, &temp, &local_stack, "MEM_STORE val must be an integer");
+                                let proxy_ctx = context.map(|c| ExecutionContext { source_file: c.source_file.clone(), current_line: local_line, instruction_index: ip });
+                                return Err(format_error_with_context(proxy_ctx.as_ref(), "MEM_STORE val must be an integer"));
+                            } 
                         };
                         let width: u8 = match width_val { 
                             Value::Int(n) => {
                                 if n < 1 || n > 8 || (n != 1 && n != 2 && n != 4 && n != 8) {
-                                    return Err("MEM_STORE width must be 1, 2, 4, or 8".to_string());
+                                    let temp = OpCode::Call("mem_store".to_string(), *arg_count);
+                                    trace_hazard(ip + 1, &temp, &local_stack, "MEM_STORE width must be 1, 2, 4, or 8");
+                                    let proxy_ctx = context.map(|c| ExecutionContext { source_file: c.source_file.clone(), current_line: local_line, instruction_index: ip });
+                                    return Err(format_error_with_context(proxy_ctx.as_ref(), "MEM_STORE width must be 1, 2, 4, or 8"));
                                 }
                                 n as u8
                             }, 
-                            _ => return Err("MEM_STORE width must be an integer".to_string()) 
+                            _ => {
+                                let temp = OpCode::Call("mem_store".to_string(), *arg_count);
+                                trace_hazard(ip + 1, &temp, &local_stack, "MEM_STORE width must be an integer");
+                                let proxy_ctx = context.map(|c| ExecutionContext { source_file: c.source_file.clone(), current_line: local_line, instruction_index: ip });
+                                return Err(format_error_with_context(proxy_ctx.as_ref(), "MEM_STORE width must be an integer"));
+                            } 
                         };
                         
                         // Simulate memory store - in real implementation this would be actual memory write
@@ -1040,7 +1297,11 @@ fn execute_function(
                         };
                         
                         if val < 0 || val > max_val {
-                            return Err(format!("MEM_STORE value {} out of range for width {}", val, width));
+                            let temp = OpCode::Call("mem_store".to_string(), *arg_count);
+                            let msg = format!("MEM_STORE value {} out of range for width {}", val, width);
+                            trace_hazard(ip + 1, &temp, &local_stack, &msg);
+                            let proxy_ctx = context.map(|c| ExecutionContext { source_file: c.source_file.clone(), current_line: local_line, instruction_index: ip });
+                            return Err(format_error_with_context(proxy_ctx.as_ref(), &msg));
                         }
                         
                         local_stack.push(Value::Bool(true));
@@ -1053,15 +1314,30 @@ fn execute_function(
                         
                         let ptr: u64 = match ptr_val { 
                             Value::Int(n) => n as u64, 
-                            _ => return Err("MEM_CMPXCHG ptr must be an integer".to_string()) 
+                            _ => {
+                                let temp = OpCode::Call("mem_cmpxchg".to_string(), *arg_count);
+                                trace_hazard(ip + 1, &temp, &local_stack, "MEM_CMPXCHG ptr must be an integer");
+                                let proxy_ctx = context.map(|c| ExecutionContext { source_file: c.source_file.clone(), current_line: local_line, instruction_index: ip });
+                                return Err(format_error_with_context(proxy_ctx.as_ref(), "MEM_CMPXCHG ptr must be an integer"));
+                            } 
                         };
                         let expect: i64 = match expect_val { 
                             Value::Int(n) => n, 
-                            _ => return Err("MEM_CMPXCHG expect must be an integer".to_string()) 
+                            _ => {
+                                let temp = OpCode::Call("mem_cmpxchg".to_string(), *arg_count);
+                                trace_hazard(ip + 1, &temp, &local_stack, "MEM_CMPXCHG expect must be an integer");
+                                let proxy_ctx = context.map(|c| ExecutionContext { source_file: c.source_file.clone(), current_line: local_line, instruction_index: ip });
+                                return Err(format_error_with_context(proxy_ctx.as_ref(), "MEM_CMPXCHG expect must be an integer"));
+                            } 
                         };
                         let _val: i64 = match val_val { 
                             Value::Int(n) => n, 
-                            _ => return Err("MEM_CMPXCHG val must be an integer".to_string()) 
+                            _ => {
+                                let temp = OpCode::Call("mem_cmpxchg".to_string(), *arg_count);
+                                trace_hazard(ip + 1, &temp, &local_stack, "MEM_CMPXCHG val must be an integer");
+                                let proxy_ctx = context.map(|c| ExecutionContext { source_file: c.source_file.clone(), current_line: local_line, instruction_index: ip });
+                                return Err(format_error_with_context(proxy_ctx.as_ref(), "MEM_CMPXCHG val must be an integer"));
+                            } 
                         };
                         
                         // Simulate atomic compare-exchange operation
@@ -1413,14 +1689,20 @@ fn execute_function(
                         if *arg_count != 1 { return Err("RESULT expects exactly 1 argument".to_string()); }
                         let func_value = local_stack.pop().expect("Expected function for RESULT");
                         match func_value {
-                            Value::Function { name: _n, params, body, rewire_target } => {
+                            Value::Function { name, params, body, rewire_target } => {
                                 let mut func_env = local_env.clone();
                                 for param_name in params.iter() {
                                     if let Some(value) = local_env.get(param_name) {
                                         func_env.insert(param_name.clone(), value.clone());
                                     }
                                 }
-                                let result = execute_function(&body, &mut local_stack, &mut func_env, context)?;
+                                // Push call frame
+                                let file = context.and_then(|c| c.source_file.clone());
+                                push_call_frame(&name, file, local_line);
+                                let result = match execute_function(&body, &mut local_stack, &mut func_env, context) {
+                                    Ok(v) => { pop_call_frame(); Ok(v) }
+                                    Err(e) => { pop_call_frame(); Err(e) }
+                                }?;
                                 if let Some(target) = rewire_target {
                                     if let Some(new_val) = func_env.get(&target) {
                                         local_env.insert(target.clone(), new_val.clone());
@@ -1727,6 +2009,7 @@ fn execute_function(
             
             OpCode::StoreVar(name) => {
                 let val = local_stack.pop().expect("Nothing to store");
+                set_trace_mem(format!("store {}", name));
                 // Ensure deep cloning of boxes to maintain immutability
                 let cloned_val = match val {
                     Value::Box(contents) => {
@@ -1752,7 +2035,12 @@ fn execute_function(
                         }
                         other => other,
                     };
-                    println!("{}", out_val.format_for_display());
+                    let text = out_val.format_for_display();
+                    if trace_enabled() {
+                        set_trace_mem(format!("print {}", shorten(&text, 20)));
+                    } else {
+                        println!("{}", text);
+                    }
                 }
             }
             
@@ -1782,6 +2070,7 @@ fn execute_function(
             
             OpCode::MakeBox => {
                 local_stack.push(Value::Box(vec![]));
+                set_trace_mem("box: []");
             }
             
             // Arithmetic operations
@@ -1828,19 +2117,35 @@ fn execute_function(
                 let a = local_stack.pop().expect("Expected first operand");
                 match (a, b) {
                     (Value::Int(x), Value::Int(y)) => {
-                        if y == 0 { return Err("Division by zero".to_string()); }
+                        if y == 0 {
+                            trace_hazard(ip + 1, instr, &local_stack, "Division by zero");
+                            let proxy_ctx = context.map(|c| ExecutionContext { source_file: c.source_file.clone(), current_line: local_line, instruction_index: ip });
+                            return Err(format_error_with_context(proxy_ctx.as_ref(), "Division by zero"));
+                        }
                         local_stack.push(Value::Float(x as f64 / y as f64));
                     }
                     (Value::Float(x), Value::Float(y)) => {
-                        if y == 0.0 { return Err("Division by zero".to_string()); }
+                        if y == 0.0 {
+                            trace_hazard(ip + 1, instr, &local_stack, "Division by zero");
+                            let proxy_ctx = context.map(|c| ExecutionContext { source_file: c.source_file.clone(), current_line: local_line, instruction_index: ip });
+                            return Err(format_error_with_context(proxy_ctx.as_ref(), "Division by zero"));
+                        }
                         local_stack.push(Value::Float(x / y));
                     }
                     (Value::Int(x), Value::Float(y)) => {
-                        if y == 0.0 { return Err("Division by zero".to_string()); }
+                        if y == 0.0 {
+                            trace_hazard(ip + 1, instr, &local_stack, "Division by zero");
+                            let proxy_ctx = context.map(|c| ExecutionContext { source_file: c.source_file.clone(), current_line: local_line, instruction_index: ip });
+                            return Err(format_error_with_context(proxy_ctx.as_ref(), "Division by zero"));
+                        }
                         local_stack.push(Value::Float(x as f64 / y));
                     }
                     (Value::Float(x), Value::Int(y)) => {
-                        if y == 0 { return Err("Division by zero".to_string()); }
+                        if y == 0 {
+                            trace_hazard(ip + 1, instr, &local_stack, "Division by zero");
+                            let proxy_ctx = context.map(|c| ExecutionContext { source_file: c.source_file.clone(), current_line: local_line, instruction_index: ip });
+                            return Err(format_error_with_context(proxy_ctx.as_ref(), "Division by zero"));
+                        }
                         local_stack.push(Value::Float(x / y as f64));
                     }
                     _ => return Err("Type error in division".to_string()),
@@ -1953,7 +2258,8 @@ fn execute_function(
                 continue;
             }
         }
-        
+        // Trace mini for function body
+        trace_mini(ip + 1, instr, &local_stack);
         ip += 1;
     }
     
@@ -2906,7 +3212,7 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
             OpCode::PushStr(s) => stack.push(Value::Str(s.clone())),
             
             // Box operations
-            OpCode::MakeBox => stack.push(Value::Box(vec![])),
+            OpCode::MakeBox => { stack.push(Value::Box(vec![])); set_trace_mem("box: []"); },
             OpCode::Pack => {
                 // Simple Pack: pop item and target, push updated box.
                 let item = stack.pop().expect("Expected value to pack");
@@ -2915,7 +3221,9 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                 match target {
                     Value::Box(mut contents) => {
                         contents.push(item);
-                        stack.push(Value::Box(contents));
+                        let vb = Value::Box(contents);
+                        set_trace_mem(format!("box: {}", shorten(&vb.format_for_display(), 20)));
+                        stack.push(vb);
                     },
                     _ => panic!("Pack target was not a box"),
                 }
@@ -2930,6 +3238,7 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         inner.resize(idx + 1, Value::None);
                     }
                     inner[idx] = value;
+                    set_trace_mem(format!("place idx={} -> {}", idx, shorten(&Value::Box(inner.clone()).format_for_display(), 20)));
                     stack.push(target);
                 } else {
                     panic!("PLACE target is not a box");
@@ -2983,6 +3292,7 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                 // Handle different box types
                 match box_val {
                     Value::Box(contents) => {
+                        set_trace_mem(format!("unpack from {}", shorten(&Value::Box(contents.clone()).format_for_display(), 20)));
                         if end_idx.is_none() {
                             // Single element extraction
                             // Debug: Print what we're trying to do (include file + instruction pointer + loop context)
@@ -3011,16 +3321,18 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                                 }
                             }
                             if start_idx < 0 || start_idx >= contents.len() as i64 {
-                                return Err(format_error_with_context(Some(&context), &format!("UNPACK: index out of bounds - tried to access index {} but array has length {} (contents: {:?})", 
-                                    start_idx, contents.len(), contents)));
+                                let msg = format!("UNPACK: index out of bounds - tried to access index {} but array has length {} (contents: {:?})", start_idx, contents.len(), contents);
+                                trace_hazard(ip + 1, instr, &stack, &msg);
+                                return Err(format_error_with_context(Some(&context), &msg));
                             }
                             stack.push(contents[start_idx as usize].clone());
                         } else {
                             // Slice extraction
                             let end = end_idx.unwrap();
                             if start_idx < 0 || end < start_idx || end > contents.len() as i64 {
-                                return Err(format_error_with_context(Some(&context), &format!("UNPACK: slice out of bounds - tried to slice from {} to {} but array has length {} (contents: {:?})", 
-                                    start_idx, end, contents.len(), contents)));
+                                let msg = format!("UNPACK: slice out of bounds - tried to slice from {} to {} but array has length {} (contents: {:?})", start_idx, end, contents.len(), contents);
+                                trace_hazard(ip + 1, instr, &stack, &msg);
+                                return Err(format_error_with_context(Some(&context), &msg));
                             }
                             let slice = contents[start_idx as usize..end as usize].to_vec();
                             stack.push(Value::Box(slice));
@@ -3030,8 +3342,9 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         if end_idx.is_none() {
                             // Single character extraction
                             if start_idx < 0 || start_idx >= s.len() as i64 {
-                                return Err(format_error_with_context(None, &format!("UNPACK: index out of bounds - tried to access index {} but string has length {} (contents: {:?})", 
-                                    start_idx, s.len(), s)));
+                                let msg = format!("UNPACK: index out of bounds - tried to access index {} but string has length {} (contents: {:?})", start_idx, s.len(), s);
+                                trace_hazard(ip + 1, instr, &stack, &msg);
+                                return Err(format_error_with_context(None, &msg));
                             }
                             let ch = s.chars().nth(start_idx as usize).unwrap();
                             stack.push(Value::Str(ch.to_string()));
@@ -3039,8 +3352,9 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                             // String slice extraction
                             let end = end_idx.unwrap();
                             if start_idx < 0 || end < start_idx || end > s.len() as i64 {
-                                return Err(format_error_with_context(None, &format!("UNPACK: slice out of bounds - tried to slice from {} to {} but string has length {} (contents: {:?})", 
-                                    start_idx, end, s.len(), s)));
+                                let msg = format!("UNPACK: slice out of bounds - tried to slice from {} to {} but string has length {} (contents: {:?})", start_idx, end, s.len(), s);
+                                trace_hazard(ip + 1, instr, &stack, &msg);
+                                return Err(format_error_with_context(None, &msg));
                             }
                             let slice: String = s.chars().skip(start_idx as usize).take((end - start_idx) as usize).collect();
                             stack.push(Value::Str(slice));
@@ -3082,20 +3396,25 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
 
                 match box_val {
                     Value::Box(list) => {
+                        set_trace_mem(format!("pick from {}", shorten(&Value::Box(list.clone()).format_for_display(), 20)));
                         if indices.is_empty() {
                             return Err("PICK: expects at least one index".to_string());
                         }
                         if indices.len() == 1 {
                             let idx = indices[0];
                             if idx < 0 || idx >= list.len() as i64 {
-                                return Err(format!("PICK: index {} out of bounds", idx));
+                                let msg = format!("PICK: index {} out of bounds", idx);
+                                trace_hazard(ip + 1, instr, &stack, &msg);
+                                return Err(msg);
                             }
                             stack.push(list[idx as usize].clone());
                         } else {
                             let mut out = Vec::with_capacity(indices.len());
                             for idx in indices {
                                 if idx < 0 || idx >= list.len() as i64 {
-                                    return Err(format!("PICK: index {} out of bounds", idx));
+                                    let msg = format!("PICK: index {} out of bounds", idx);
+                                    trace_hazard(ip + 1, instr, &stack, &msg);
+                                    return Err(msg);
                                 }
                                 out.push(list[idx as usize].clone());
                             }
@@ -3109,7 +3428,9 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         if indices.len() == 1 {
                             let idx = indices[0];
                             if idx < 0 || idx >= s.len() as i64 {
-                                return Err(format!("PICK: index {} out of bounds", idx));
+                                let msg = format!("PICK: index {} out of bounds", idx);
+                                trace_hazard(ip + 1, instr, &stack, &msg);
+                                return Err(msg);
                             }
                             let ch = s.chars().nth(idx as usize).unwrap();
                             stack.push(Value::Str(ch.to_string()));
@@ -3117,7 +3438,9 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                             let mut out = String::new();
                             for idx in indices {
                                 if idx < 0 || idx >= s.len() as i64 {
-                                    return Err(format!("PICK: index {} out of bounds", idx));
+                                    let msg = format!("PICK: index {} out of bounds", idx);
+                                    trace_hazard(ip + 1, instr, &stack, &msg);
+                                    return Err(msg);
                                 }
                                 if let Some(ch) = s.chars().nth(idx as usize) {
                                     out.push(ch);
@@ -3138,23 +3461,27 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                 if let Some(val) = stack.pop() {
                     let out_val = match val {
                         Value::Str(s) => {
-                            // If rewired symbol, print its bound value
                             if is_rewired(&env, &s) {
                                 env.get(&s).cloned().unwrap_or(Value::Str(s))
                             } else {
-                                // Print strings literally - do not evaluate as code
                                 Value::Str(s)
                             }
                         }
                         other => other,
                     };
-                    if let Err(e) = writeln!(std::io::stdout(), "{}", out_val.format_for_display()) {
-                        return Err(format!("Failed to write output: {}", e));
+                    let text = out_val.format_for_display();
+                    if trace_enabled() {
+                        set_trace_mem(format!("print {}", shorten(&text, 20)));
+                    } else {
+                        if let Err(e) = writeln!(std::io::stdout(), "{}", text) {
+                            return Err(format!("Failed to write output: {}", e));
+                        }
                     }
                 }
             }
             OpCode::LoadVar(name) => {
                 if let Some(val) = env.get(name) {
+                    set_trace_mem(format!("load {}", name));
                     // Ensure deep cloning of boxes to maintain immutability
                     let cloned_val = match val {
                         Value::Box(contents) => {
@@ -3173,6 +3500,7 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
             }
             OpCode::StoreVar(name) => {
                 let val = stack.pop().expect("Nothing to store");
+                set_trace_mem(format!("store {}", name));
                 // Ensure deep cloning of boxes to maintain immutability
                 let cloned_val = match val {
                     Value::Box(contents) => {
@@ -3231,19 +3559,19 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                 let a = stack.pop().expect("Expected first operand");
                 match (a, b) {
                     (Value::Int(x), Value::Int(y)) => {
-                        if y == 0 { return Err("Division by zero".to_string()); }
+                        if y == 0 { trace_hazard(ip + 1, instr, &stack, "Division by zero"); return Err(format_error_with_context(Some(&context), "Division by zero")); }
                         stack.push(Value::Float(x as f64 / y as f64));
                     }
                     (Value::Float(x), Value::Float(y)) => {
-                        if y == 0.0 { return Err("Division by zero".to_string()); }
+                        if y == 0.0 { trace_hazard(ip + 1, instr, &stack, "Division by zero"); return Err(format_error_with_context(Some(&context), "Division by zero")); }
                         stack.push(Value::Float(x / y));
                     }
                     (Value::Int(x), Value::Float(y)) => {
-                        if y == 0.0 { return Err("Division by zero".to_string()); }
+                        if y == 0.0 { trace_hazard(ip + 1, instr, &stack, "Division by zero"); return Err(format_error_with_context(Some(&context), "Division by zero")); }
                         stack.push(Value::Float(x as f64 / y));
                     }
                     (Value::Float(x), Value::Int(y)) => {
-                        if y == 0 { return Err("Division by zero".to_string()); }
+                        if y == 0 { trace_hazard(ip + 1, instr, &stack, "Division by zero"); return Err(format_error_with_context(Some(&context), "Division by zero")); }
                         stack.push(Value::Float(x / y as f64));
                     }
                     _ => return Err("Type error in division".to_string()),
@@ -3522,15 +3850,10 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         match mgr.close(id) { Ok(_) => stack.push(Value::Bool(true)), Err(e) => return Err(e) }
                     }
                     "http_post" => {
-                        if *arg_count < 2 || *arg_count > 3 { return Err("HTTP_POST expects 2 or 3 arguments (url, data[, headers])".to_string()); }
-                        let headers = if *arg_count == 3 {
-                            let headers_val = stack.pop().expect("Expected headers for HTTP_POST");
-                            Some(parse_headers_box(headers_val)?)
-                        } else { None };
-                        let data_val = stack.pop().expect("Expected data for HTTP_POST");
-                        let url_val = stack.pop().expect("Expected URL for HTTP_POST");
-                        let url = match url_val { Value::Str(s) => s, _ => return Err("HTTP_POST url must be a string".to_string()) };
-                        let data = match data_val { Value::Str(s) => s, _ => return Err("HTTP_POST data must be a string".to_string()) };
+                        ensure_arity_one_of("HTTP_POST", *arg_count, &[2,3], "(url, data[, headers])")?;
+                        let headers = if *arg_count == 3 { Some(parse_headers_box(stack.pop().unwrap())?) } else { None };
+                        let data = pop_string_arg(&mut stack, "HTTP_POST", "data")?;
+                        let url = pop_string_arg(&mut stack, "HTTP_POST", "url")?;
                         let (status, hs, body) = http_post_impl(&url, &data, headers.as_deref())?;
                         let resp = Value::Box(vec![
                             Value::Int(status),
@@ -3540,15 +3863,10 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         stack.push(resp);
                     }
                     "http_put" => {
-                        if *arg_count < 2 || *arg_count > 3 { return Err("HTTP_PUT expects 2 or 3 arguments (url, data[, headers])".to_string()); }
-                        let headers = if *arg_count == 3 {
-                            let headers_val = stack.pop().expect("Expected headers for HTTP_PUT");
-                            Some(parse_headers_box(headers_val)?)
-                        } else { None };
-                        let data_val = stack.pop().expect("Expected data for HTTP_PUT");
-                        let url_val = stack.pop().expect("Expected URL for HTTP_PUT");
-                        let url = match url_val { Value::Str(s) => s, _ => return Err("HTTP_PUT url must be a string".to_string()) };
-                        let data = match data_val { Value::Str(s) => s, _ => return Err("HTTP_PUT data must be a string".to_string()) };
+                        ensure_arity_one_of("HTTP_PUT", *arg_count, &[2,3], "(url, data[, headers])")?;
+                        let headers = if *arg_count == 3 { Some(parse_headers_box(stack.pop().unwrap())?) } else { None };
+                        let data = pop_string_arg(&mut stack, "HTTP_PUT", "data")?;
+                        let url = pop_string_arg(&mut stack, "HTTP_PUT", "url")?;
                         let (status, hs, body) = http_put_impl(&url, &data, headers.as_deref())?;
                         let resp = Value::Box(vec![
                             Value::Int(status),
@@ -3558,13 +3876,9 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         stack.push(resp);
                     }
                     "http_delete" => {
-                        if *arg_count < 1 || *arg_count > 2 { return Err("HTTP_DELETE expects 1 or 2 arguments (url[, headers])".to_string()); }
-                        let url_val = stack.pop().expect("Expected URL for HTTP_DELETE");
-                        let url = match url_val { Value::Str(s) => s, _ => return Err("HTTP_DELETE url must be a string".to_string()) };
-                        let headers = if *arg_count == 2 {
-                            let headers_val = stack.pop().expect("Expected headers for HTTP_DELETE");
-                            Some(parse_headers_box(headers_val)?)
-                        } else { None };
+                        ensure_arity_one_of("HTTP_DELETE", *arg_count, &[1,2], "(url[, headers])")?;
+                        let url = pop_string_arg(&mut stack, "HTTP_DELETE", "url")?;
+                        let headers = if *arg_count == 2 { Some(parse_headers_box(stack.pop().unwrap())?) } else { None };
                         let (status, hs, body) = http_delete_impl(&url, headers.as_deref())?;
                         let resp = Value::Box(vec![
                             Value::Int(status),
@@ -3583,16 +3897,15 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         }
                     }
                     "json_encode" => {
-                        if *arg_count != 1 { return Err("JSON_ENCODE expects exactly 1 argument".to_string()); }
-                        let val = stack.pop().expect("Expected value for JSON_ENCODE");
+                        ensure_arity_one_of("JSON_ENCODE", *arg_count, &[1], "")?;
+                        let val = stack.pop().unwrap();
                         let j = value_to_json(&val)?;
                         let s = serde_json::to_string(&j).map_err(|e| format!("JSON_ENCODE error: {}", e))?;
                         stack.push(Value::Str(s));
                     }
                     "json_decode" => {
-                        if *arg_count != 1 { return Err("JSON_DECODE expects exactly 1 argument".to_string()); }
-                        let sval = stack.pop().expect("Expected string for JSON_DECODE");
-                        let s = match sval { Value::Str(s) => s, _ => return Err("JSON_DECODE argument must be a string".to_string()) };
+                        ensure_arity_one_of("JSON_DECODE", *arg_count, &[1], "")?;
+                        let s = pop_string_arg(&mut stack, "JSON_DECODE", "input")?;
                         let j: JsonValue = serde_json::from_str(&s).map_err(|e| format!("JSON_DECODE error: {}", e))?;
                         let v = json_to_value(&j);
                         stack.push(v);
@@ -3613,16 +3926,14 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         stack.push(Value::Str(out));
                     }
                     "url_encode" => {
-                        if *arg_count != 1 { return Err("URL_ENCODE expects exactly 1 argument".to_string()); }
-                        let sval = stack.pop().expect("Expected string for URL_ENCODE");
-                        let s = match sval { Value::Str(s) => s, _ => return Err("URL_ENCODE argument must be a string".to_string()) };
+                        ensure_arity_one_of("URL_ENCODE", *arg_count, &[1], "")?;
+                        let s = pop_string_arg(&mut stack, "URL_ENCODE", "string")?;
                         let out = urlencoding::encode(&s).into_owned();
                         stack.push(Value::Str(out));
                     }
                     "url_decode" => {
-                        if *arg_count != 1 { return Err("URL_DECODE expects exactly 1 argument".to_string()); }
-                        let sval = stack.pop().expect("Expected string for URL_DECODE");
-                        let s = match sval { Value::Str(s) => s, _ => return Err("URL_DECODE argument must be a string".to_string()) };
+                        ensure_arity_one_of("URL_DECODE", *arg_count, &[1], "")?;
+                        let s = pop_string_arg(&mut stack, "URL_DECODE", "string")?;
                         let out = urlencoding::decode(&s).map_err(|e| format!("URL_DECODE error: {}", e))?.into_owned();
                         stack.push(Value::Str(out));
                     }
@@ -3667,16 +3978,18 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         
                         let ptr: u64 = match ptr_val { 
                             Value::Int(n) => n as u64, 
-                            _ => return Err("MEM_LOAD ptr must be an integer".to_string()) 
+                            _ => { let temp = OpCode::Call("mem_load".to_string(), *arg_count); trace_hazard(ip + 1, &temp, &stack, "MEM_LOAD ptr must be an integer"); return Err(format_error_with_context(Some(&context), "MEM_LOAD ptr must be an integer")) } 
                         };
                         let width: u8 = match width_val { 
                             Value::Int(n) => {
                                 if n < 1 || n > 8 || (n != 1 && n != 2 && n != 4 && n != 8) {
-                                    return Err("MEM_LOAD width must be 1, 2, 4, or 8".to_string());
+                                    let temp = OpCode::Call("mem_load".to_string(), *arg_count);
+                                    trace_hazard(ip + 1, &temp, &stack, "MEM_LOAD width must be 1, 2, 4, or 8");
+                                    return Err(format_error_with_context(Some(&context), "MEM_LOAD width must be 1, 2, 4, or 8"));
                                 }
                                 n as u8
                             }, 
-                            _ => return Err("MEM_LOAD width must be an integer".to_string()) 
+                            _ => { let temp = OpCode::Call("mem_load".to_string(), *arg_count); trace_hazard(ip + 1, &temp, &stack, "MEM_LOAD width must be an integer"); return Err(format_error_with_context(Some(&context), "MEM_LOAD width must be an integer")) } 
                         };
                         
                         // Simulate memory load - in real implementation this would be actual memory access
@@ -3699,20 +4012,22 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         
                         let _ptr: u64 = match ptr_val { 
                             Value::Int(n) => n as u64, 
-                            _ => return Err("MEM_STORE ptr must be an integer".to_string()) 
+                            _ => { let temp = OpCode::Call("mem_store".to_string(), *arg_count); trace_hazard(ip + 1, &temp, &stack, "MEM_STORE ptr must be an integer"); return Err(format_error_with_context(Some(&context), "MEM_STORE ptr must be an integer")) } 
                         };
                         let val: i64 = match val_val { 
                             Value::Int(n) => n, 
-                            _ => return Err("MEM_STORE val must be an integer".to_string()) 
+                            _ => { let temp = OpCode::Call("mem_store".to_string(), *arg_count); trace_hazard(ip + 1, &temp, &stack, "MEM_STORE val must be an integer"); return Err(format_error_with_context(Some(&context), "MEM_STORE val must be an integer")) } 
                         };
                         let width: u8 = match width_val { 
                             Value::Int(n) => {
                                 if n < 1 || n > 8 || (n != 1 && n != 2 && n != 4 && n != 8) {
-                                    return Err("MEM_STORE width must be 1, 2, 4, or 8".to_string());
+                                    let temp = OpCode::Call("mem_store".to_string(), *arg_count);
+                                    trace_hazard(ip + 1, &temp, &stack, "MEM_STORE width must be 1, 2, 4, or 8");
+                                    return Err(format_error_with_context(Some(&context), "MEM_STORE width must be 1, 2, 4, or 8"));
                                 }
                                 n as u8
                             }, 
-                            _ => return Err("MEM_STORE width must be an integer".to_string()) 
+                            _ => { let temp = OpCode::Call("mem_store".to_string(), *arg_count); trace_hazard(ip + 1, &temp, &stack, "MEM_STORE width must be an integer"); return Err(format_error_with_context(Some(&context), "MEM_STORE width must be an integer")) } 
                         };
                         
                         // Simulate memory store - in real implementation this would be actual memory write
@@ -3729,7 +4044,10 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         };
                         
                         if val < 0 || val > max_val {
-                            return Err(format!("MEM_STORE value {} out of range for width {}", val, width));
+                            let temp = OpCode::Call("mem_store".to_string(), *arg_count);
+                            let msg = format!("MEM_STORE value {} out of range for width {}", val, width);
+                            trace_hazard(ip + 1, &temp, &stack, &msg);
+                            return Err(format_error_with_context(Some(&context), &msg));
                         }
                         
                         stack.push(Value::Bool(true));
@@ -3742,15 +4060,15 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         
                         let ptr: u64 = match ptr_val { 
                             Value::Int(n) => n as u64, 
-                            _ => return Err("MEM_CMPXCHG ptr must be an integer".to_string()) 
+                            _ => { let temp = OpCode::Call("mem_cmpxchg".to_string(), *arg_count); trace_hazard(ip + 1, &temp, &stack, "MEM_CMPXCHG ptr must be an integer"); return Err(format_error_with_context(Some(&context), "MEM_CMPXCHG ptr must be an integer")) } 
                         };
                         let expect: i64 = match expect_val { 
                             Value::Int(n) => n, 
-                            _ => return Err("MEM_CMPXCHG expect must be an integer".to_string()) 
+                            _ => { let temp = OpCode::Call("mem_cmpxchg".to_string(), *arg_count); trace_hazard(ip + 1, &temp, &stack, "MEM_CMPXCHG expect must be an integer"); return Err(format_error_with_context(Some(&context), "MEM_CMPXCHG expect must be an integer")) } 
                         };
                         let _val: i64 = match val_val { 
                             Value::Int(n) => n, 
-                            _ => return Err("MEM_CMPXCHG val must be an integer".to_string()) 
+                            _ => { let temp = OpCode::Call("mem_cmpxchg".to_string(), *arg_count); trace_hazard(ip + 1, &temp, &stack, "MEM_CMPXCHG val must be an integer"); return Err(format_error_with_context(Some(&context), "MEM_CMPXCHG val must be an integer")) } 
                         };
                         
                         // Simulate atomic compare-exchange operation
@@ -5745,7 +6063,10 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                                 // Execute the factory in a cloned environment to collect its definitions
                                 let mut module_env = env.clone();
                                 let mut tmp_stack: Vec<Value> = Vec::new();
-                                let _ = execute_function(&body, &mut tmp_stack, &mut module_env, Some(&context))?;
+                                push_call_frame(&name, context.source_file.clone(), context.current_line);
+                                let exec_res = execute_function(&body, &mut tmp_stack, &mut module_env, Some(&context));
+                                pop_call_frame();
+                                let _ = exec_res?;
                                 // Diff module_env against env to get new/changed definitions
                                 let mut exports = HashMap::new();
                                 for (key, value) in module_env.iter() {
@@ -5881,7 +6202,7 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         }
                         let func_value = stack.pop().expect("Expected function for RESULT");
                         match func_value {
-                            Value::Function { name: _name, params, body, rewire_target } => {
+                            Value::Function { name, params, body, rewire_target } => {
                                 // Execute the function with its captured parameters
                                 // For now, we'll execute it in the current environment
                                 // TODO: Implement proper closure environment
@@ -5899,7 +6220,11 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                                 }
                                 
                                 let mut func_env_mut = func_env;
-                                let result = execute_function(&body, &mut stack, &mut func_env_mut, Some(&context))?;
+                                push_call_frame(&name, context.source_file.clone(), context.current_line);
+                                let result = match execute_function(&body, &mut stack, &mut func_env_mut, Some(&context)) {
+                                    Ok(v) => { pop_call_frame(); Ok(v) }
+                                    Err(e) => { pop_call_frame(); Err(e) }
+                                }?;
                                 // If this is a rewire function, propagate the target back to env
                                 if let Some(target) = rewire_target {
                                     if let Some(new_val) = func_env_mut.get(&target) {
@@ -5926,7 +6251,11 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                                 let mut env_clone = env.clone();
                                 for (i, p) in params.iter().enumerate() { env_clone.insert(p.clone(), args[i].clone()); }
                                 let body_clone = body.clone();
-                                let result = execute_function(&body_clone, &mut stack, &mut env_clone, Some(&context))?;
+                                push_call_frame(&name, context.source_file.clone(), context.current_line);
+                                let result = match execute_function(&body_clone, &mut stack, &mut env_clone, Some(&context)) {
+                                    Ok(v) => { pop_call_frame(); Ok(v) }
+                                    Err(e) => { pop_call_frame(); Err(e) }
+                                }?;
                                 stack.push(result);
                             }
                             _ => return Err(format!("'{}' is not a function", func_name)),
@@ -6047,7 +6376,8 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                 return Err("TCP_ACCEPT not yet implemented (blocking operation)".to_string());
             }
         }
-        
+        // Trace mini for top-level program
+        trace_mini(ip + 1, instr, &stack);
         // Normal instruction progression
         ip += 1;
     }
