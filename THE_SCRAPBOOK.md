@@ -2,7 +2,10 @@
 
 **A comprehensive manual for the Scraps programming language**
 
-> **Navigation Tip**: Use GitHub's table of contents (📋 icon) or Ctrl+F to quickly find what you need!
+scraps new <project_dir> — scaffolds a project with .gitignore, clanker.toml, and void/main.scraps (Hello World).
+scraps build [project_dir] — validates clanker.toml, sources dir, and module files exist.
+scraps --verify <file.scraps> — runs in safe mode (no IO/network/etc.), fails on test(...) and disallowed calls.
+
 
 ---
 
