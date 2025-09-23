@@ -1,6 +1,0 @@
-# Should fail and halt with a clear message
-print "=== TEST assert fail (expect error) ==="
-x = 2
-test (x > 5)
-print "should not reach here"
-

@@ -1,6 +1,0 @@
-# Example Scraps source file
-# This will be compiled to native assembly
-
-x = 42 + 17
-y = x * 2
-print y

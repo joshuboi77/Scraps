@@ -1,11 +1,6 @@
 # This file defines the project structure and module dependencies
 
 [modules]
-# Core compiler modules
-lexer = "lexer.scraps"
-parser = "parser.scraps"
-codegen = "codegen.scraps"
-main = "main.scraps"
 # Tensor library
 tensor = "tensor.scraps"
 tensor3d = "tensor3d.scraps"

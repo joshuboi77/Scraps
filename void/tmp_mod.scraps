@@ -1,3 +1,0 @@
-fn(use()) { 
-    42 
-} -> forty_two

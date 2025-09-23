@@ -1,7 +1,0 @@
-# Trigger an out-of-bounds UNPACK to show hazard highlighting
-
-b = box()
-pack(1) -> b
-pack(2) -> b
-z = unpack(5) <- b  # OOB index
-
