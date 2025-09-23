@@ -22,6 +22,61 @@ y = x + 17
 print y
 ```
 
+### Project CLI
+- Create a new project scaffold:
+  - `scraps new myproj`
+  - Creates `.gitignore`, `clanker.toml`, and `void/main.scraps` (Hello World)
+- Build (validate manifest and module files):
+  - `scraps build [project_dir]`
+  - Parses `clanker.toml` and checks that all `modules` exist under `[paths].sources` (default `void`)
+- Verify (safe run: blocks IO/network/side effects):
+  - `scraps --verify path/to/file.scraps`
+  - Fails on `test(...)` assertions or disallowed calls; prints focused Trace on errors
+  - Summarizes assertions: e.g. `Verify passed (tests: N)`
+  - Disallows: file read/write, http/tcp/udp/tls/ws/raw sockets, event loop, proxy/timeouts/pool configuration, and module mutation (source/import/ship/rename)
+  - Allows typed input: `input_str`, `input_int` (verify checks correct parsing; `input_int` fails on invalid integers)
+  - Rewire ceremony is allowed in verify mode (type/memory safe); normal type rules still apply
+
+#### Verification Policy & Roadmap
+- Philosophy: Verification should be about “proving it’s right,” not just “disallowing everything.” The current defaults are conservative for determinism and hermeticity, but the model supports richer checks.
+- Near‑term options (and what they’d look like):
+  - Read‑only files: allow `read <- path` within project sandbox, fail if path escapes, reject non‑UTF‑8, enforce max size, hash input for reproducibility.
+  - HTTP/network: allow with explicit fixtures or deterministic mocks (e.g., `HTTP_FIXTURES=...`), or require a recorded cassette; fail if response differs from the cassette.
+  - Event loop/timers: allow with virtual time; fail on wall‑clock calls; require bounded waits.
+  - Proxy/timeout/pool: allow reading current config but block mutation, unless running in a capability sandbox.
+  - Module ops: allow `import` from the declared `clanker.toml` only; block `ship/rename` during verify.
+- Capability/allow‑list flags (future): `scraps --verify --allow=read,http(import-only),import`
+  - Each allowed effect must pass logic rules (path sandboxing, cassette checks, virtual time). Fail if not satisfied.
+- Tests as contracts: keep using `test(...)` as contracts; pair with static analyses and symbolic checks to erase guards and enable stronger optimizations when obligations are proved.
+
+#### Example
+```scraps
+print "=== verify contracts ==="
+x = int(2.9)
+test (x == 2)
+
+b = int_box()
+pack(1, 2, 3) -> b
+test (count(b) == 3)
+
+text = substring("hello", 0, 2)
+test (text == "he")
+
+print "ok"
+```
+Run: `scraps --verify path/to/file.scraps`
+→ `Verify passed (tests: 3)`
+
+```scraps
+print "=== verify input ==="
+n = input_int("n? ")
+test (n == 7)
+```
+Run: `printf '7\n' | scraps --verify path/to/file.scraps`
+→ `Verify passed (tests: 1)`
+- Run a file:
+  - `scraps path/to/file.scraps`
+
 ---
 
 ## 📋 Table of Contents

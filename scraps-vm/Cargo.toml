@@ -3,6 +3,10 @@ name = "scraps-vm"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "scraps"
+path = "src/main.rs"
+
 [dependencies]
 ureq = { version = "2", default-features = true }
 serde = { version = "1", features = ["derive"] }

@@ -19,6 +19,7 @@ use crate::raw_socket_manager::RawSocketManager;
 use crate::network_interface_manager::{NetworkInterfaceManager, get_best_interface_for_binding, get_interface_by_ip};
 use crate::ipv6_manager::{IPv6Manager, DualStackMode, create_dual_stack_socket_addr};
 use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use ureq;
 use serde_json::{self, Value as JsonValue, Number as JsonNumber};
 // std::time and std::thread imports removed as they're unused
@@ -142,9 +143,34 @@ thread_local! {
     static TRACE_FN_DEPTH: RefCell<usize> = RefCell::new(0);
 }
 
-// Error/argument helpers (first pass)
+// Thread-local for last execution context and helpers
+thread_local! {
+    static LAST_CONTEXT: RefCell<Option<ExecutionContext>> = RefCell::new(None);
+}
+
+fn set_last_context_from(ctx: Option<&ExecutionContext>, ip: usize, line: usize) {
+    let snapshot = ctx.map(|c| ExecutionContext {
+        source_file: c.source_file.clone(),
+        current_line: line,
+        instruction_index: ip,
+    });
+    LAST_CONTEXT.with(|lc| *lc.borrow_mut() = snapshot);
+}
+
+fn with_last_context<F, R>(f: F) -> R
+where
+    F: FnOnce(Option<&ExecutionContext>) -> R,
+{
+    LAST_CONTEXT.with(|lc| {
+        let borrow = lc.borrow();
+        let opt = borrow.as_ref();
+        f(opt)
+    })
+}
+
+// Error/argument helpers (context-enriched)
 fn err_arity(fname: &str, got: usize, expect_text: &str) -> String {
-    format!("{} expects {} (got {})", fname, expect_text, got)
+    format_error_with_context(None, &format!("{} expects {} (got {})", fname, expect_text, got))
 }
 
 fn ensure_arity_one_of(fname: &str, arg_count: usize, allowed: &[usize], sig: &str) -> Result<(), String> {
@@ -160,17 +186,17 @@ fn ensure_arity_one_of(fname: &str, arg_count: usize, allowed: &[usize], sig: &s
 }
 
 fn pop_string_arg(stack: &mut Vec<Value>, fname: &str, label: &str) -> Result<String, String> {
-    let v = stack.pop().ok_or_else(|| format!("{} missing {}", fname, label))?;
-    match v { Value::Str(s) => Ok(s), _ => Err(format!("{} {} must be a string", fname, label)) }
+    let v = stack.pop().ok_or_else(|| format_error_with_context(None, &format!("{} missing {}", fname, label)))?;
+    match v { Value::Str(s) => Ok(s), _ => Err(format_error_with_context(None, &format!("{} {} must be a string", fname, label))) }
 }
 
 #[allow(dead_code)]
 fn pop_usize_arg(stack: &mut Vec<Value>, fname: &str, label: &str) -> Result<usize, String> {
-    let v = stack.pop().ok_or_else(|| format!("{} missing {}", fname, label))?;
+    let v = stack.pop().ok_or_else(|| format_error_with_context(None, &format!("{} missing {}", fname, label)))?;
     match v {
         Value::Int(n) if n >= 0 => Ok(n as usize),
         Value::Float(f) if f >= 0.0 => Ok(f as usize),
-        _ => Err(format!("{} {} must be a non-negative number", fname, label)),
+        _ => Err(format_error_with_context(None, &format!("{} {} must be a non-negative number", fname, label))),
     }
 }
 
@@ -184,14 +210,44 @@ struct ExecutionContext {
 const REWIRED_KEY: &str = "__rewired__";
 
 fn format_error_with_context(context: Option<&ExecutionContext>, message: &str) -> String {
-    let mut base = if let Some(context) = context {
-        if let Some(ref file) = context.source_file {
-            format!("{} (at {}:{}: instruction {})", message, file, context.current_line, context.instruction_index)
+    // Normalize message: attach a simple error code prefix if missing
+    // Codes are heuristic based on the message prefix
+    fn classify_code(msg: &str) -> &'static str {
+        let m = msg.to_ascii_uppercase();
+        if m.contains("TYPE") { "E_TYPE" }
+        else if m.contains("ARITY") || m.contains("EXPECTS") { "E_ARITY" }
+        else if m.contains("INDEX OUT OF BOUNDS") || m.contains("SLICE OUT OF BOUNDS") { "E_BOUNDS" }
+        else if m.contains("JSON") { "E_JSON" }
+        else if m.contains("HTTP") { "E_HTTP" }
+        else if m.contains("INPUT_") { "E_INPUT" }
+        else if m.contains("VERIFY") { "E_VERIFY" }
+        else if m.contains("IMPORT") || m.contains("SOURCE") || m.contains("SHIP") { "E_MODULE" }
+        else { "E_RUNTIME" }
+    }
+
+    let code = classify_code(message);
+
+    // Choose a context: prefer explicit, else fall back to last-seen
+    let chosen_ctx = if context.is_some() { context } else { None };
+    let mut base = if let Some(ctx) = chosen_ctx {
+        if let Some(ref file) = ctx.source_file {
+            format!("[{}] {} (at {}:{}: instruction {})", code, message, file, ctx.current_line, ctx.instruction_index)
         } else {
-            format!("{} (at instruction {})", message, context.instruction_index)
+            format!("[{}] {} (at instruction {})", code, message, ctx.instruction_index)
         }
     } else {
-        message.to_string()
+        // Try LAST_CONTEXT snapshot
+        let mut produced = None;
+        with_last_context(|opt| {
+            if let Some(ctx) = opt {
+                if let Some(ref file) = ctx.source_file {
+                    produced = Some(format!("[{}] {} (at {}:{}: instruction {})", code, message, file, ctx.current_line, ctx.instruction_index));
+                } else {
+                    produced = Some(format!("[{}] {} (at instruction {})", code, message, ctx.instruction_index));
+                }
+            }
+        });
+        produced.unwrap_or_else(|| format!("[{}] {}", code, message))
     };
 
     // Append a basic call stack trace if available
@@ -210,8 +266,8 @@ fn format_error_with_context(context: Option<&ExecutionContext>, message: &str) 
     });
 
     // Append relevant mini-trace rows (last few around the error ip)
-    if let Some(ctx) = context {
-        // Build header consistent with mini-trace table
+    let effective_ctx = if context.is_some() { context.cloned() } else { None };
+    if let Some(ctx) = effective_ctx {
         let gap_ip_op = " ".repeat(GAP_IP_OP);
         let gap_op_stack = " ".repeat(GAP_OP_STACK);
         let gap_stack_mem = " ".repeat(GAP_STACK_MEM);
@@ -265,6 +321,8 @@ static PROXY_MANAGER_GLOBAL: OnceLock<Mutex<ProxyManager>> = OnceLock::new();
 static RAW_MANAGER_GLOBAL: OnceLock<Mutex<RawSocketManager>> = OnceLock::new();
 static INTERFACE_MANAGER_GLOBAL: OnceLock<Mutex<NetworkInterfaceManager>> = OnceLock::new();
 static IPV6_MANAGER_GLOBAL: OnceLock<Mutex<IPv6Manager>> = OnceLock::new();
+static SAFE_MODE_FLAG: OnceLock<bool> = OnceLock::new();
+static ASSERT_COUNTER: OnceLock<AtomicUsize> = OnceLock::new();
 
 fn tcp_manager_global() -> &'static Mutex<TcpSocketManager> {
     TCP_MANAGER_GLOBAL.get_or_init(|| Mutex::new(TcpSocketManager::new()))
@@ -308,6 +366,51 @@ fn interface_manager_global() -> &'static Mutex<NetworkInterfaceManager> {
 
 fn ipv6_manager_global() -> &'static Mutex<IPv6Manager> {
     IPV6_MANAGER_GLOBAL.get_or_init(|| Mutex::new(IPv6Manager::new()))
+}
+
+pub fn set_safe_mode(on: bool) {
+    let _ = SAFE_MODE_FLAG.set(on);
+}
+
+fn is_safe_mode() -> bool {
+    *SAFE_MODE_FLAG.get_or_init(|| false)
+}
+
+fn safe_mode_disallow(func: &str) -> Option<&'static str> {
+    match func.to_ascii_lowercase().as_str() {
+        // File I/O (disallow writes/reads in verify; stdin is allowed when typed)
+        "write" => Some("file write"),
+        "read" => Some("file read"),
+        // Network
+        s if s.starts_with("tcp_") => Some("TCP networking"),
+        s if s.starts_with("udp_") => Some("UDP networking"),
+        s if s.starts_with("tls_") => Some("TLS networking"),
+        s if s.starts_with("ws_") => Some("WebSocket networking"),
+        s if s.starts_with("raw_socket") => Some("raw socket"),
+        // HTTP/URL ok to encode/decode, but block HTTP network
+        "http_get" | "http_post" | "http_put" | "http_delete" => Some("HTTP network"),
+        // Event loop
+        s if s.starts_with("event_") => Some("event loop"),
+        // Proxies/timeouts/pool mgmt manipulate global network config — block in verify
+        s if s.starts_with("proxy_") => Some("proxy configuration"),
+        s if s.starts_with("timeout_") => Some("timeout configuration"),
+        s if s.starts_with("pool_") => Some("connection pool configuration"),
+        // Source/module loading can introduce side effects; allow only from clanker in compile, but block in verify.
+        "source" | "import" | "ship" | "rename" => Some("module/system mutation"),
+        _ => None,
+    }
+}
+
+fn assert_counter() -> &'static AtomicUsize {
+    ASSERT_COUNTER.get_or_init(|| AtomicUsize::new(0))
+}
+
+pub fn reset_verify_counters() {
+    assert_counter().store(0, Ordering::Relaxed);
+}
+
+pub fn get_verify_assert_count() -> usize {
+    assert_counter().load(Ordering::Relaxed)
 }
 
 // Error/argument helpers (first pass)
@@ -902,11 +1005,13 @@ fn execute_function(
             }
         }
     }
-    
-        while ip < body.len() {
-            let instr = &body[ip];
-            
-            match instr {
+    // Prime LAST_CONTEXT with initial state
+    set_last_context_from(context, ip, local_line);
+    while ip < body.len() {
+        let instr = &body[ip];
+        // Set LAST_CONTEXT snapshot at the start of each instruction
+        set_last_context_from(context, ip, local_line);
+        match instr {
             OpCode::SetLine(n) => { local_line = *n; }
             // Stack operations
             OpCode::PushInt(n) => local_stack.push(Value::Int(*n)),
@@ -1158,6 +1263,12 @@ fn execute_function(
             OpCode::Call(_func_name, arg_count) => {
                 let func_name_value = local_stack.pop().expect("Expected function name on stack");
                 let func_name = match func_name_value { Value::Str(s) => s, _ => return Err("Function name must be a string".to_string()) };
+                // Verify mode guard for disallowed built-ins
+                if is_safe_mode() {
+                    if let Some(reason) = safe_mode_disallow(&func_name) {
+                        return Err(format!("VERIFY: disallowed builtin '{}' in verify mode: {}", func_name, reason));
+                    }
+                }
                 let func = local_env.get(&func_name).cloned().ok_or("Function not found")?;
                 match func_name.as_str() {
                     "box" => { if *arg_count != 0 { return Err("BOX expects 0 arguments".to_string()); } local_stack.push(Value::Box(vec![])); }
@@ -1973,6 +2084,9 @@ fn execute_function(
                         let func_value = local_stack.pop().expect("Expected function for RESULT");
                         match func_value {
                             Value::Function { name, params, body, rewire_target } => {
+                                if is_safe_mode() && rewire_target.is_some() {
+                                    return Err(format!("VERIFY: disallowed rewire function '{}' in verify mode", name));
+                                }
                                 let mut func_env = local_env.clone();
                                 for param_name in params.iter() {
                                     if let Some(value) = local_env.get(param_name) {
@@ -2252,7 +2366,8 @@ fn execute_function(
                     }
                     _ => {
                         match func {
-                            Value::Function { name, params, body, .. } => {
+                            Value::Function { name, params, body, rewire_target: _ } => {
+                                // Rewire is permitted in verify mode (type/memory safe by design)
                                 if params.len() != *arg_count { return Err(format!("Function '{}' expects {} arguments, got {}", name, params.len(), arg_count)); }
                                 // Pop args and bind to params in a cloned env
                                 let mut args = Vec::with_capacity(*arg_count);
@@ -2272,6 +2387,7 @@ fn execute_function(
             OpCode::Assert => {
                 // Pop condition and assert truthiness
                 let cond = local_stack.pop().ok_or("ASSERT: missing value")?;
+                assert_counter().fetch_add(1, Ordering::Relaxed);
                 match cond {
                     Value::Bool(true) => { /* ok */ }
                     Value::Bool(false) => {
@@ -6450,7 +6566,13 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         if *arg_count != 0 { return Err("SHIP expects 0 arguments".to_string()); }
                         // Get the function name from the environment
                         let func_name = func_name.clone();
-                        let func = env.get(&func_name).cloned().ok_or("Function not found")?;
+                // Verify mode guard for disallowed built-ins
+                if is_safe_mode() {
+                    if let Some(reason) = safe_mode_disallow(&func_name) {
+                        return Err(format!("VERIFY: disallowed builtin '{}' in verify mode: {}", func_name, reason));
+                    }
+                }
+                let func = env.get(&func_name).cloned().ok_or("Function not found")?;
                         match func {
                             Value::Function { name, params, body, .. } => {
                                 if !params.is_empty() { return Err("SHIP: function argument must take 0 parameters".to_string()); }
@@ -6597,6 +6719,7 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         let func_value = stack.pop().expect("Expected function for RESULT");
                         match func_value {
                             Value::Function { name, params, body, rewire_target } => {
+                                // Rewire is permitted in verify mode (type/memory safe by design)
                                 // Execute the function with its captured parameters
                                 // For now, we'll execute it in the current environment
                                 // TODO: Implement proper closure environment
@@ -6637,7 +6760,7 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                     _ => {
                         // Handle user-defined functions (pure by default): bind args, run in cloned env
                         match func {
-                            Value::Function { name, params, body, .. } => {
+                            Value::Function { name, params, body, rewire_target: _ } => {
                                 if params.len() != *arg_count {
                                     return Err(format!("Function '{}' expects {} arguments, got {}", 
                                         name, params.len(), arg_count));
@@ -6664,6 +6787,7 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
             OpCode::Assert => {
                 // Assert at top-level context
                 let cond = stack.pop().ok_or("ASSERT: missing value")?;
+                assert_counter().fetch_add(1, Ordering::Relaxed);
                 match cond {
                     Value::Bool(true) => { /* ok */ }
                     Value::Bool(false) => {
