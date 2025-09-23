@@ -1265,6 +1265,42 @@ fn execute_function(
                         let out = urlencoding::decode(&s).map_err(|e| format!("URL_DECODE error: {}", e))?.into_owned();
                         local_stack.push(Value::Str(out));
                     }
+                    "input_str" => {
+                        ensure_arity_one_of("INPUT_STR", *arg_count, &[0,1], "(prompt?)")?;
+                        if *arg_count == 1 {
+                            let prompt = pop_string_arg(&mut local_stack, "INPUT_STR", "prompt")?;
+                            let _ = write!(std::io::stdout(), "{}", prompt);
+                            let _ = std::io::stdout().flush();
+                        }
+                        let mut buf = String::new();
+                        match std::io::stdin().read_line(&mut buf) {
+                            Ok(_) => {
+                                if buf.ends_with('\n') { buf.pop(); if buf.ends_with('\r') { buf.pop(); } }
+                                local_stack.push(Value::Str(buf));
+                            }
+                            Err(e) => return Err(format!("INPUT_STR error: {}", e)),
+                        }
+                    }
+                    "input_int" => {
+                        ensure_arity_one_of("INPUT_INT", *arg_count, &[0,1], "(prompt?)")?;
+                        if *arg_count == 1 {
+                            let prompt = pop_string_arg(&mut local_stack, "INPUT_INT", "prompt")?;
+                            let _ = write!(std::io::stdout(), "{}", prompt);
+                            let _ = std::io::stdout().flush();
+                        }
+                        let mut buf = String::new();
+                        match std::io::stdin().read_line(&mut buf) {
+                            Ok(_) => {
+                                if buf.ends_with('\n') { buf.pop(); if buf.ends_with('\r') { buf.pop(); } }
+                                let s = buf.trim();
+                                match s.parse::<i64>() {
+                                    Ok(n) => local_stack.push(Value::Int(n)),
+                                    Err(_) => return Err("INPUT_INT: cannot parse integer".to_string()),
+                                }
+                            }
+                            Err(e) => return Err(format!("INPUT_INT error: {}", e)),
+                        }
+                    }
                     "http_delete" => {
                         ensure_arity_one_of("HTTP_DELETE", *arg_count, &[1,2], "(url[, headers])")?;
                         let url = pop_string_arg(&mut local_stack, "HTTP_DELETE", "url")?;
@@ -2623,6 +2659,18 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
     });
     env.insert("read".to_string(), Value::Function {
         name: "read".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("input_str".to_string(), Value::Function {
+        name: "input_str".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("input_int".to_string(), Value::Function {
+        name: "input_int".to_string(),
         params: vec![],
         body: vec![],
         rewire_target: None,
@@ -4217,6 +4265,42 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         let s = pop_string_arg(&mut stack, "URL_DECODE", "string")?;
                         let out = urlencoding::decode(&s).map_err(|e| format!("URL_DECODE error: {}", e))?.into_owned();
                         stack.push(Value::Str(out));
+                    }
+                    "input_str" => {
+                        ensure_arity_one_of("INPUT_STR", *arg_count, &[0,1], "(prompt?)")?;
+                        if *arg_count == 1 {
+                            let prompt = pop_string_arg(&mut stack, "INPUT_STR", "prompt")?;
+                            if let Err(e) = write!(std::io::stdout(), "{}", prompt) { return Err(format!("INPUT_STR prompt error: {}", e)); }
+                            let _ = std::io::stdout().flush();
+                        }
+                        let mut buf = String::new();
+                        match std::io::stdin().read_line(&mut buf) {
+                            Ok(_) => {
+                                if buf.ends_with('\n') { buf.pop(); if buf.ends_with('\r') { buf.pop(); } }
+                                stack.push(Value::Str(buf));
+                            }
+                            Err(e) => return Err(format!("INPUT_STR error: {}", e)),
+                        }
+                    }
+                    "input_int" => {
+                        ensure_arity_one_of("INPUT_INT", *arg_count, &[0,1], "(prompt?)")?;
+                        if *arg_count == 1 {
+                            let prompt = pop_string_arg(&mut stack, "INPUT_INT", "prompt")?;
+                            if let Err(e) = write!(std::io::stdout(), "{}", prompt) { return Err(format!("INPUT_INT prompt error: {}", e)); }
+                            let _ = std::io::stdout().flush();
+                        }
+                        let mut buf = String::new();
+                        match std::io::stdin().read_line(&mut buf) {
+                            Ok(_) => {
+                                if buf.ends_with('\n') { buf.pop(); if buf.ends_with('\r') { buf.pop(); } }
+                                let s = buf.trim();
+                                match s.parse::<i64>() {
+                                    Ok(n) => stack.push(Value::Int(n)),
+                                    Err(_) => return Err("INPUT_INT: cannot parse integer".to_string()),
+                                }
+                            }
+                            Err(e) => return Err(format!("INPUT_INT error: {}", e)),
+                        }
                     }
                     // Casts/constructors at top-level
                     "int" => {

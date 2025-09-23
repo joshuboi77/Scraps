@@ -885,6 +885,20 @@ print (5 + 3)
 print ("Result: " + result)
 ```
 
+### Input
+```scraps
+# Read a line from stdin (without trailing newline)
+name = input_str("Enter your name: ")  # returns Str
+print ("Hello, " + name)
+
+# Read an integer safely by casting
+age = input_int("Enter age: ")
+print ("You are " + age + " years old")
+```
+Notes:
+- `input_str([prompt]) -> string` returns Str
+- `input_int([prompt]) -> int` returns Int; errors if the input is not a valid integer
+
 ---
 
 ## 🌐 Network Functions

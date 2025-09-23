@@ -585,6 +585,8 @@ impl Compiler {
                         "int" | "INT" => Some(CType::Int),
                         "str" | "STR" => Some(CType::Str),
                         "string" | "STRING" => Some(CType::Str),
+                        "input_str" | "INPUT_STR" => Some(CType::Str),
+                        "input_int" | "INPUT_INT" => Some(CType::Int),
                         "int_box" | "INT_BOX" => Some(CType::BoxInt),
                         "str_box" | "STR_BOX" => Some(CType::BoxStr),
                         "box" | "BOX" => Some(CType::Box),
