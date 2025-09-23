@@ -90,6 +90,57 @@ x = 42
 y = 17
 ```
 
+### Static Typing & Casts
+Scraps now enforces static types per variable binding at runtime (with compile-time checks where possible):
+
+- The first assignment establishes a variable’s type (Int, Float, Bool, Str, Box, Function, None).
+- Any later assignment must match the original type. To change a type, explicitly use rewire (see below).
+- Typed constructors/casts:
+  - `int(x)` converts from Int/Float/Bool/Str → Int (string must be a valid integer)
+  - `str(x)` converts any value to its display string
+- Typed box constructors:
+  - `int_box()` creates an empty box intended for integers
+  - `str_box()` creates an empty box intended for strings
+
+Examples:
+```scraps
+x = 1          # x is Int
+x = 2          # OK
+x = "two"      # Compile/runtime TYPE error (different type)
+
+y = str(5)     # y is Str → "5"
+z = int(2.9)   # z is Int → 2
+
+ib = int_box()
+pack(1, 2, 3) -> ib      # OK
+pack("x") -> ib          # Compile-time TYPE error (BoxInt expects Int elements)
+
+sb = str_box()
+pack("a", "b") -> sb    # OK
+place(0:"Z") -> sb       # OK
+place(1:9) -> sb          # Compile-time TYPE error (BoxStr expects Str elements)
+```
+
+Type changes require an explicit rewire ceremony (see Rewire System).
+
+#### Static Typing Quick Reference
+- First assignment locks variable type; subsequent assignments must match unless rewired.
+- Change type via rewire ceremony or `rewire_symbol("x")` before assignment.
+- Casts:
+  - `int(x)` → Int (from Int/Float/Bool/Str; strings must parse)
+  - `str(x)` → Str (display string)
+- Typed boxes:
+  - `int_box()` → BoxInt; elements must be Int (compile-time checked when known)
+  - `str_box()` → BoxStr; elements must be Str (compile-time checked when known)
+- Example (type change):
+```scraps
+x = 1
+rewire x {
+  x = "now string"
+} -> x
+print x  # now string
+```
+
 ---
 
 ## 🏗️ Data Types
@@ -347,6 +398,29 @@ fn(use()) {
 } -> setup_dynamics
 ```
 
+### REWIRE — Ceremony
+Use the rewire ceremony to apply changes (including type changes) to an existing binding without introducing a new name. The output of the ceremony is the same variable:
+
+```scraps
+# Rewire a variable in place; the result is the same symbol
+x = 1
+rewire x {
+  x = x + 41
+} -> x
+print x  # 42
+
+# Change type with rewire
+rewire x {
+  x = "forty-two"
+} -> x
+print x  # forty-two
+```
+
+Notes:
+- The body runs in a function scope. On `result(...)`, the VM applies the new value of the target symbol back to the caller’s environment.
+- Type changes are permitted during rewire.
+- No temporary variables are created; the ceremony returns the same symbol (avoids shadowing/renaming).
+
 ### Module Development
 ```scraps
 # my_module.scraps - Define functions and variables
@@ -477,6 +551,13 @@ place(5:"GRAPE") -> my_box   # ["apple", "ORANGE", "cherry", None, None, "GRAPE"
 
 # Multiple placements
 place(0:"FIRST", 2:"THIRD") -> my_box
+```
+Typed boxes enforce element types at compile time when known:
+```scraps
+ib = int_box()
+place(0:"a") -> ib    # Compile-time TYPE error (expects Int)
+sb = str_box()
+pack(1) -> sb         # Compile-time TYPE error (expects Str)
 ```
 
 ### String Operations
@@ -977,6 +1058,8 @@ print tokens
 
 ### Core Language Functions
 - `box()` - Create empty box
+- `int_box()` - Create empty typed box for integers
+- `str_box()` - Create empty typed box for strings
 - `pack(items...) -> box` - Add items to box
 - `unpack(index) <- box` - Get item from box
 - `pick(indices...) <- box` - Select multiple elements from box or string
@@ -1030,6 +1113,10 @@ print tokens
 - `starts_with(string, prefix) -> bool` - Check prefix
 - `ends_with(string, suffix) -> bool` - Check suffix
 
+### Casts
+- `int(x) -> int` - Convert Float/Bool/Str to Int (string must parse as integer)
+- `str(x) -> string` - Convert any value to its display string
+
 ### Math Functions
 - `abs(x)`, `sign(x)`, `min(x, y)`, `max(x, y)`
 - `pow(x, y)`, `sqrt(x)`, `floor(x)`, `ceil(x)`, `round(x)`
@@ -1062,6 +1149,25 @@ print tokens
 
 ### DNS
 - `dns_resolve(hostname) -> ip_string`
+
+---
+
+## 🧭 Debugging & Trace
+
+Mini-trace shows a compact, per-step view of execution.
+
+- Enable by setting the environment variable `SCRAPS_TRACE` (any value).
+  - Example: `SCRAPS_TRACE=1 cargo run -- path/to/file.scraps`
+- Columns:
+  - `ip` — instruction pointer (shows `fn N` inside functions)
+  - `opcode` — mnemonic of the current operation
+  - `Value stack` — brief view of the stack values
+  - `Boxes` — top-most box on the stack (to visualize mutations)
+  - `Var` — variable used on this row (load/store), shown once per relevant row
+  - `Output` — printed text, shown on print rows
+- Runtime errors include a focused “Trace:” snippet with the same columns and a few rows around the failing instruction. The row where the error occurs is highlighted in red.
+
+Tip: Use `rewire_symbol("x")` before changing a variable’s type dynamically (e.g., from Int to Str), or use the rewire ceremony.
 
 ### Events
 - `event_register(socket, event_types) -> event_id` (event_types: string or box of strings: `read|write|accept|connect`)

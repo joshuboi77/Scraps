@@ -28,6 +28,101 @@ use std::cell::RefCell;
 use unicode_width::UnicodeWidthStr;
 use std::env;
 
+// ========================
+// Static typing support
+// ========================
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypeTag {
+    Int,
+    Float,
+    Bool,
+    Str,
+    Box,
+    Function,
+    None,
+    TcpConnection,
+    TcpListener,
+    WebSocket,
+    UdpSocket,
+    TlsConnection,
+    TlsListener,
+    RawSocket,
+}
+
+fn type_tag_name(t: TypeTag) -> &'static str {
+    match t {
+        TypeTag::Int => "Int",
+        TypeTag::Float => "Float",
+        TypeTag::Bool => "Bool",
+        TypeTag::Str => "Str",
+        TypeTag::Box => "Box",
+        TypeTag::Function => "Function",
+        TypeTag::None => "None",
+        TypeTag::TcpConnection => "TcpConnection",
+        TypeTag::TcpListener => "TcpListener",
+        TypeTag::WebSocket => "WebSocket",
+        TypeTag::UdpSocket => "UdpSocket",
+        TypeTag::TlsConnection => "TlsConnection",
+        TypeTag::TlsListener => "TlsListener",
+        TypeTag::RawSocket => "RawSocket",
+    }
+}
+
+fn value_type_tag(v: &Value) -> TypeTag {
+    match v {
+        Value::Int(_) => TypeTag::Int,
+        Value::Float(_) => TypeTag::Float,
+        Value::Bool(_) => TypeTag::Bool,
+        Value::Str(_) => TypeTag::Str,
+        Value::Box(_) => TypeTag::Box,
+        Value::Function { .. } => TypeTag::Function,
+        Value::None => TypeTag::None,
+        Value::TcpConnection(_) => TypeTag::TcpConnection,
+        Value::TcpListener(_) => TypeTag::TcpListener,
+        Value::WebSocket(_) => TypeTag::WebSocket,
+        Value::UdpSocket(_) => TypeTag::UdpSocket,
+        Value::TlsConnection(_) => TypeTag::TlsConnection,
+        Value::TlsListener(_) => TypeTag::TlsListener,
+        Value::RawSocket(_) => TypeTag::RawSocket,
+    }
+}
+
+static TYPE_ENV_GLOBAL: OnceLock<Mutex<HashMap<String, TypeTag>>> = OnceLock::new();
+fn type_env_global() -> &'static Mutex<HashMap<String, TypeTag>> {
+    TYPE_ENV_GLOBAL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn ensure_type_on_store(
+    env_for_rewire: &HashMap<String, Value>,
+    name: &str,
+    val: &Value,
+    context: Option<&ExecutionContext>,
+    allow_override: bool,
+) -> Result<(), String> {
+    let new_tag = value_type_tag(val);
+    let mut map = type_env_global().lock().map_err(|_| "TYPE env poisoned".to_string())?;
+    if let Some(old_tag) = map.get(name).copied() {
+        if old_tag == new_tag {
+            return Ok(());
+        }
+        if allow_override || is_rewired(env_for_rewire, name) {
+            map.insert(name.to_string(), new_tag);
+            return Ok(());
+        }
+        let msg = format!(
+            "TYPE error: variable '{}' is declared as {} but got {}. Use rewire_symbol('{}') or a rewire block to change its type",
+            name,
+            type_tag_name(old_tag),
+            type_tag_name(new_tag),
+            name
+        );
+        return Err(format_error_with_context(context, &msg));
+    } else {
+        map.insert(name.to_string(), new_tag);
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CallFrame {
     name: String,
@@ -39,8 +134,12 @@ thread_local! {
     static CALL_STACK: RefCell<Vec<CallFrame>> = RefCell::new(Vec::new());
     static TRACE_INIT: RefCell<bool> = RefCell::new(false);
     static TRACE_STEP: RefCell<usize> = RefCell::new(0);
-    // Unified memory/event note for the trace's third column
-    static TRACE_MEM_NOTE: RefCell<Option<String>> = RefCell::new(None);
+    // Ring buffer of recent mini-trace rows to show relevant context on errors
+    static TRACE_RING: RefCell<Vec<TraceEntry>> = RefCell::new(Vec::new());
+    // One-shot per-row output & var notes and function depth
+    static TRACE_OUTPUT_NOTE: RefCell<Option<String>> = RefCell::new(None);
+    static TRACE_VAR_NOTE: RefCell<Option<String>> = RefCell::new(None);
+    static TRACE_FN_DEPTH: RefCell<usize> = RefCell::new(0);
 }
 
 // Error/argument helpers (first pass)
@@ -109,6 +208,48 @@ fn format_error_with_context(context: Option<&ExecutionContext>, message: &str) 
             }
         }
     });
+
+    // Append relevant mini-trace rows (last few around the error ip)
+    if let Some(ctx) = context {
+        // Build header consistent with mini-trace table
+        let gap_ip_op = " ".repeat(GAP_IP_OP);
+        let gap_op_stack = " ".repeat(GAP_OP_STACK);
+        let gap_stack_mem = " ".repeat(GAP_STACK_MEM);
+        let header = format!(
+            "{}{}{}{}{}{}{}{}{}{}{}",
+            pad_left_vis("ip", COL_IP_WIDTH),
+            gap_ip_op,
+            pad_right_vis("opcode", COL_OPCODE_WIDTH),
+            gap_op_stack,
+            pad_right_vis("Value stack", COL_STACK_WIDTH),
+            gap_stack_mem,
+            pad_right_vis("Boxes", COL_BOXES_WIDTH),
+            gap_stack_mem,
+            pad_right_vis("Var", COL_VAR_WIDTH),
+            gap_stack_mem,
+            pad_right_vis("Output", COL_OUTPUT_WIDTH),
+        );
+        let total = COL_IP_WIDTH
+            + GAP_IP_OP
+            + COL_OPCODE_WIDTH
+            + GAP_OP_STACK
+            + COL_STACK_WIDTH
+            + GAP_STACK_MEM
+            + COL_BOXES_WIDTH
+            + GAP_STACK_MEM
+            + COL_VAR_WIDTH
+            + GAP_STACK_MEM
+            + COL_OUTPUT_WIDTH;
+        let rows = get_relevant_trace(ctx.instruction_index, 3, 6);
+        if !rows.is_empty() {
+            base.push_str("\nTrace:");
+            base.push_str("\n");
+            base.push_str(&header);
+            base.push_str("\n");
+            base.push_str(&"-".repeat(total));
+            for r in rows { base.push_str("\n"); base.push_str(&r); }
+        }
+    }
 
     base
 }
@@ -179,18 +320,68 @@ fn pop_call_frame() {
 }
 
 fn trace_enabled() -> bool {
-    match env::var("SCRAPS_TRACE") {
-        Ok(val) => val.to_ascii_lowercase().contains("mini"),
-        Err(_) => false,
+    // Enable mini-trace if the SCRAPS_TRACE env var is present at all
+    // Any value (including empty) turns it on; unset turns it off
+    env::var("SCRAPS_TRACE").is_ok()
+}
+
+fn set_trace_output<S: Into<String>>(note: S) {
+    TRACE_OUTPUT_NOTE.with(|tb| { *tb.borrow_mut() = Some(note.into()); });
+}
+
+fn take_trace_output() -> Option<String> {
+    TRACE_OUTPUT_NOTE.with(|tb| tb.borrow_mut().take())
+}
+
+fn set_trace_var<S: Into<String>>(note: S) {
+    TRACE_VAR_NOTE.with(|tb| { *tb.borrow_mut() = Some(note.into()); });
+}
+
+fn take_trace_var() -> Option<String> {
+    TRACE_VAR_NOTE.with(|tb| tb.borrow_mut().take())
+}
+
+#[derive(Clone)]
+struct TraceEntry {
+    ip: usize,
+    rendered: String,
+    red: bool,
+}
+
+fn record_trace_entry(ip: usize, rendered: String, red: bool) {
+    TRACE_RING.with(|rb| {
+        let mut v = rb.borrow_mut();
+        v.push(TraceEntry { ip, rendered, red });
+        if v.len() > 64 {
+            let trim = v.len() - 64;
+            v.drain(0..trim);
+        }
+    });
+}
+
+fn get_relevant_trace(ip: usize, max_before: usize, max_total: usize) -> Vec<String> {
+    TRACE_RING.with(|rb| {
+        let v = rb.borrow();
+        if v.is_empty() { return Vec::new(); }
+        let mut end_idx = v.len() - 1;
+        for (i, e) in v.iter().enumerate().rev() {
+            if e.ip == ip || e.red { end_idx = i; break; }
+        }
+        let start_idx = end_idx.saturating_sub(max_before);
+        v.iter().skip(start_idx).take(max_total).map(|e| e.rendered.clone()).collect()
+    })
+}
+
+struct FnDepthGuard;
+impl Drop for FnDepthGuard {
+    fn drop(&mut self) {
+        TRACE_FN_DEPTH.with(|d| { let mut dm = d.borrow_mut(); if *dm > 0 { *dm -= 1; } });
     }
 }
 
-fn set_trace_mem<S: Into<String>>(note: S) {
-    TRACE_MEM_NOTE.with(|tb| { *tb.borrow_mut() = Some(note.into()); });
-}
-
-fn get_trace_mem_note() -> Option<String> {
-    TRACE_MEM_NOTE.with(|tb| tb.borrow().clone())
+fn fn_depth_guard_enter() -> FnDepthGuard {
+    TRACE_FN_DEPTH.with(|d| { let mut dm = d.borrow_mut(); *dm += 1; });
+    FnDepthGuard
 }
 
 fn opcode_summary(op: &OpCode) -> String {
@@ -233,10 +424,12 @@ fn opcode_summary(op: &OpCode) -> String {
     }
 }
 
-const COL_IP_WIDTH: usize = 3;
+const COL_IP_WIDTH: usize = 6;
 const COL_OPCODE_WIDTH: usize = 12;
 const COL_STACK_WIDTH: usize = 25;
-const COL_MEM_WIDTH: usize = 24;
+const COL_BOXES_WIDTH: usize = 28;
+const COL_VAR_WIDTH: usize = 12;
+const COL_OUTPUT_WIDTH: usize = 28;
 const VAL_ITEM_MAX: usize = 10;
 
 // Inter-column gap constants for trace output
@@ -284,7 +477,6 @@ fn format_stack_brief(stack: &Vec<Value>) -> String {
 }
 
 fn trace_mini_row(ip: usize, instr: &OpCode, stack: &Vec<Value>, red: bool, _note: Option<&str>) {
-    if !trace_enabled() { return; }
     TRACE_INIT.with(|ti| {
         let mut init = ti.borrow_mut();
         if !*init {
@@ -292,24 +484,32 @@ fn trace_mini_row(ip: usize, instr: &OpCode, stack: &Vec<Value>, red: bool, _not
             let gap_op_stack = " ".repeat(GAP_OP_STACK);
             let gap_stack_mem = " ".repeat(GAP_STACK_MEM);
             let header = format!(
-                "{}{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}{}{}{}",
                 pad_left_vis("ip", COL_IP_WIDTH),
                 gap_ip_op,
                 pad_right_vis("opcode", COL_OPCODE_WIDTH),
                 gap_op_stack,
                 pad_right_vis("Value stack", COL_STACK_WIDTH),
                 gap_stack_mem,
-                pad_right_vis("Memory", COL_MEM_WIDTH),
+                pad_right_vis("Boxes", COL_BOXES_WIDTH),
+                gap_stack_mem,
+                pad_right_vis("Var", COL_VAR_WIDTH),
+                gap_stack_mem,
+                pad_right_vis("Output", COL_OUTPUT_WIDTH),
             );
-            println!("{}", header);
+            if trace_enabled() { println!("{}", header); }
             let total = COL_IP_WIDTH
                 + GAP_IP_OP
                 + COL_OPCODE_WIDTH
                 + GAP_OP_STACK
                 + COL_STACK_WIDTH
                 + GAP_STACK_MEM
-                + COL_MEM_WIDTH;
-            println!("{}", "-".repeat(total));
+                + COL_BOXES_WIDTH
+                + GAP_STACK_MEM
+                + COL_VAR_WIDTH
+                + GAP_STACK_MEM
+                + COL_OUTPUT_WIDTH;
+            if trace_enabled() { println!("{}", "-".repeat(total)); }
             *init = true;
         }
     });
@@ -320,14 +520,34 @@ fn trace_mini_row(ip: usize, instr: &OpCode, stack: &Vec<Value>, red: bool, _not
     let v_col_plain = pad_right_vis(&clamp_display(&v_plain, COL_STACK_WIDTH), COL_STACK_WIDTH);
     let v_col = if red { format!("\x1b[31m{}\x1b[0m", v_col_plain) } else { v_col_plain };
 
-    let mem_raw = get_trace_mem_note().unwrap_or_else(|| "-".to_string());
-    let mem_col = pad_right_vis(&clamp_display(&mem_raw, COL_MEM_WIDTH), COL_MEM_WIDTH);
+    // Boxes
+    let mut boxes_brief = String::from("-");
+    for v in stack.iter().rev() {
+        if let Value::Box(contents) = v {
+            boxes_brief = shorten(&Value::Box(contents.clone()).format_for_display(), COL_BOXES_WIDTH - 1);
+            break;
+        }
+    }
+    let boxes_col = pad_right_vis(&clamp_display(&boxes_brief, COL_BOXES_WIDTH), COL_BOXES_WIDTH);
 
-    let ip_col = pad_left_vis(&ip.to_string(), COL_IP_WIDTH);
+    // Var and Output (one-shot)
+    let var_raw = take_trace_var().unwrap_or_else(|| "".to_string());
+    let var_col = pad_right_vis(&clamp_display(&var_raw, COL_VAR_WIDTH), COL_VAR_WIDTH);
+    let out_raw = take_trace_output().unwrap_or_else(|| "".to_string());
+    let out_col = pad_right_vis(&clamp_display(&out_raw, COL_OUTPUT_WIDTH), COL_OUTPUT_WIDTH);
+
+    let ip_str = TRACE_FN_DEPTH.with(|d| { let depth = *d.borrow(); if depth > 0 { format!("fn {}", ip) } else { ip.to_string() } });
+    let ip_col = pad_left_vis(&ip_str, COL_IP_WIDTH);
     let gap_ip_op = " ".repeat(GAP_IP_OP);
     let gap_op_stack = " ".repeat(GAP_OP_STACK);
     let gap_stack_mem = " ".repeat(GAP_STACK_MEM);
-    println!("{}{}{}{}{}{}{}", ip_col, gap_ip_op, op_col, gap_op_stack, v_col, gap_stack_mem, mem_col);
+    let line = format!(
+        "{}{}{}{}{}{}{}{}{}{}{}",
+        ip_col, gap_ip_op, op_col, gap_op_stack, v_col, gap_stack_mem, boxes_col, gap_stack_mem, var_col, gap_stack_mem, out_col
+    );
+    if trace_enabled() { println!("{}", line); }
+    let rendered = if red { format!("\x1b[31m{}\x1b[0m", line) } else { line };
+    record_trace_entry(ip, rendered, red);
 }
 
 fn trace_mini(ip: usize, instr: &OpCode, stack: &Vec<Value>) {
@@ -335,7 +555,6 @@ fn trace_mini(ip: usize, instr: &OpCode, stack: &Vec<Value>) {
 }
 
 fn trace_hazard(ip: usize, instr: &OpCode, stack: &Vec<Value>, _msg: &str) {
-    if !trace_enabled() { return; }
     trace_mini_row(ip, instr, stack, true, None);
 }
 
@@ -536,7 +755,7 @@ fn eval_snippet(env: &mut HashMap<String, Value>, src: &str) -> Result<Value, St
     let mut parser = Parser::new(tokens);
     let program = parser.parse().map_err(|e| e.to_string())?;
     let mut compiler = Compiler::new();
-    let bytecode = compiler.compile(program.statements);
+    let bytecode = compiler.compile(program.statements)?;
     // Execute in the provided environment, capture the last value on stack
     let mut stack: Vec<Value> = Vec::new();
     execute_function(&bytecode, &mut stack, env, None)
@@ -667,6 +886,7 @@ fn execute_function(
     env: &mut HashMap<String, Value>,
     context: Option<&ExecutionContext>,
 ) -> Result<Value, String> {
+    let _fn_depth_guard = fn_depth_guard_enter();
     let mut local_stack = Vec::new();
     let local_env = env; // operate on provided environment
     let mut ip: usize = 0;
@@ -697,7 +917,7 @@ fn execute_function(
             // Variables
             OpCode::LoadVar(name) => {
                 if let Some(val) = local_env.get(name) {
-                    set_trace_mem(format!("load {}", name));
+                    set_trace_var(name.clone());
                     // Ensure deep cloning of boxes to maintain immutability
                     let cloned_val = match val {
                         Value::Box(contents) => {
@@ -915,7 +1135,6 @@ fn execute_function(
                     Value::Box(mut contents) => {
                         contents.push(item);
                         let vb = Value::Box(contents);
-                        set_trace_mem(format!("box: {}", shorten(&vb.format_for_display(), 20)));
                         local_stack.push(vb);
                     }
                     _ => return Err("Pack target was not a box".to_string()),
@@ -930,7 +1149,6 @@ fn execute_function(
                         inner.resize(idx + 1, Value::None);
                     }
                     inner[idx] = value;
-                    set_trace_mem(format!("place idx={} -> {}", idx, shorten(&Value::Box(inner.clone()).format_for_display(), 20)));
                     local_stack.push(target);
                 } else {
                     return Err("PLACE target is not a box".to_string());
@@ -968,6 +1186,35 @@ fn execute_function(
                         let j: JsonValue = serde_json::from_str(&s).map_err(|e| format!("JSON_DECODE error: {}", e))?;
                         let v = json_to_value(&j);
                         local_stack.push(v);
+                    }
+                    // Typed constructors/casts in function scope
+                    "int" => {
+                        ensure_arity_one_of("INT", *arg_count, &[1], "(x)")?;
+                        let v = local_stack.pop().unwrap();
+                        let out = match v {
+                            Value::Int(n) => Value::Int(n),
+                            Value::Float(f) => Value::Int(f as i64),
+                            Value::Bool(b) => Value::Int(if b {1} else {0}),
+                            Value::Str(s) => {
+                                let ss = s.trim();
+                                match ss.parse::<i64>() { Ok(n) => Value::Int(n), Err(_) => return Err("INT: cannot parse integer from string".to_string()) }
+                            }
+                            _ => return Err("INT: unsupported argument type".to_string()),
+                        };
+                        local_stack.push(out);
+                    }
+                    "str" => {
+                        ensure_arity_one_of("STR", *arg_count, &[1], "(x)")?;
+                        let v = local_stack.pop().unwrap();
+                        local_stack.push(Value::Str(v.format_for_display()));
+                    }
+                    "int_box" => {
+                        ensure_arity_one_of("INT_BOX", *arg_count, &[0], "()")?;
+                        local_stack.push(Value::Box(vec![]));
+                    }
+                    "str_box" => {
+                        ensure_arity_one_of("STR_BOX", *arg_count, &[0], "()")?;
+                        local_stack.push(Value::Box(vec![]));
                     }
                     "http_post" => {
                         ensure_arity_one_of("HTTP_POST", *arg_count, &[2,3], "(url, data[, headers])")?;
@@ -1699,12 +1946,16 @@ fn execute_function(
                                 // Push call frame
                                 let file = context.and_then(|c| c.source_file.clone());
                                 push_call_frame(&name, file, local_line);
+                                // Mark rewire target in local env to permit type change during rewire
+                                if let Some(target) = &rewire_target { add_rewired(&mut func_env, target); }
                                 let result = match execute_function(&body, &mut local_stack, &mut func_env, context) {
                                     Ok(v) => { pop_call_frame(); Ok(v) }
                                     Err(e) => { pop_call_frame(); Err(e) }
                                 }?;
                                 if let Some(target) = rewire_target {
                                     if let Some(new_val) = func_env.get(&target) {
+                                        // Rewire explicitly allows type change
+                                        let _ = ensure_type_on_store(&local_env, &target, new_val, context, true)?;
                                         local_env.insert(target.clone(), new_val.clone());
                                     }
                                 }
@@ -2009,7 +2260,7 @@ fn execute_function(
             
             OpCode::StoreVar(name) => {
                 let val = local_stack.pop().expect("Nothing to store");
-                set_trace_mem(format!("store {}", name));
+                set_trace_var(name.clone());
                 // Ensure deep cloning of boxes to maintain immutability
                 let cloned_val = match val {
                     Value::Box(contents) => {
@@ -2018,6 +2269,11 @@ fn execute_function(
                     }
                     other => other
                 };
+                // Enforce static type (first assignment defines; changes require rewire)
+                if let Err(msg) = ensure_type_on_store(&local_env, name, &cloned_val, context, false) {
+                    trace_mini_row(ip + 1, instr, &local_stack, true, None);
+                    return Err(msg);
+                }
                 local_env.insert(name.clone(), cloned_val);
             }
             
@@ -2036,8 +2292,10 @@ fn execute_function(
                         other => other,
                     };
                     let text = out_val.format_for_display();
+                    set_trace_output(text.clone());
                     if trace_enabled() {
-                        set_trace_mem(format!("print {}", shorten(&text, 20)));
+                        // mini trace already gets Output column; still print line output to stdout
+                        println!("{}", text);
                     } else {
                         println!("{}", text);
                     }
@@ -2070,7 +2328,6 @@ fn execute_function(
             
             OpCode::MakeBox => {
                 local_stack.push(Value::Box(vec![]));
-                set_trace_mem("box: []");
             }
             
             // Arithmetic operations
@@ -2323,6 +2580,31 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
     });
     env.insert("print".to_string(), Value::Function {
         name: "print".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    // Typed constructors/casts
+    env.insert("int".to_string(), Value::Function {
+        name: "int".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("str".to_string(), Value::Function {
+        name: "str".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("int_box".to_string(), Value::Function {
+        name: "int_box".to_string(),
+        params: vec![],
+        body: vec![],
+        rewire_target: None,
+    });
+    env.insert("str_box".to_string(), Value::Function {
+        name: "str_box".to_string(),
         params: vec![],
         body: vec![],
         rewire_target: None,
@@ -3212,7 +3494,7 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
             OpCode::PushStr(s) => stack.push(Value::Str(s.clone())),
             
             // Box operations
-            OpCode::MakeBox => { stack.push(Value::Box(vec![])); set_trace_mem("box: []"); },
+            OpCode::MakeBox => { stack.push(Value::Box(vec![])); },
             OpCode::Pack => {
                 // Simple Pack: pop item and target, push updated box.
                 let item = stack.pop().expect("Expected value to pack");
@@ -3222,7 +3504,6 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                     Value::Box(mut contents) => {
                         contents.push(item);
                         let vb = Value::Box(contents);
-                        set_trace_mem(format!("box: {}", shorten(&vb.format_for_display(), 20)));
                         stack.push(vb);
                     },
                     _ => panic!("Pack target was not a box"),
@@ -3238,7 +3519,6 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         inner.resize(idx + 1, Value::None);
                     }
                     inner[idx] = value;
-                    set_trace_mem(format!("place idx={} -> {}", idx, shorten(&Value::Box(inner.clone()).format_for_display(), 20)));
                     stack.push(target);
                 } else {
                     panic!("PLACE target is not a box");
@@ -3292,7 +3572,7 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                 // Handle different box types
                 match box_val {
                     Value::Box(contents) => {
-                        set_trace_mem(format!("unpack from {}", shorten(&Value::Box(contents.clone()).format_for_display(), 20)));
+                        // Boxes column will reflect resulting state from stack
                         if end_idx.is_none() {
                             // Single element extraction
                             // Debug: Print what we're trying to do (include file + instruction pointer + loop context)
@@ -3396,7 +3676,6 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
 
                 match box_val {
                     Value::Box(list) => {
-                        set_trace_mem(format!("pick from {}", shorten(&Value::Box(list.clone()).format_for_display(), 20)));
                         if indices.is_empty() {
                             return Err("PICK: expects at least one index".to_string());
                         }
@@ -3470,18 +3749,15 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         other => other,
                     };
                     let text = out_val.format_for_display();
-                    if trace_enabled() {
-                        set_trace_mem(format!("print {}", shorten(&text, 20)));
-                    } else {
-                        if let Err(e) = writeln!(std::io::stdout(), "{}", text) {
-                            return Err(format!("Failed to write output: {}", e));
-                        }
+                    set_trace_output(text.clone());
+                    if let Err(e) = writeln!(std::io::stdout(), "{}", text) {
+                        return Err(format!("Failed to write output: {}", e));
                     }
                 }
             }
             OpCode::LoadVar(name) => {
                 if let Some(val) = env.get(name) {
-                    set_trace_mem(format!("load {}", name));
+                    set_trace_var(name.clone());
                     // Ensure deep cloning of boxes to maintain immutability
                     let cloned_val = match val {
                         Value::Box(contents) => {
@@ -3500,7 +3776,7 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
             }
             OpCode::StoreVar(name) => {
                 let val = stack.pop().expect("Nothing to store");
-                set_trace_mem(format!("store {}", name));
+                set_trace_var(name.clone());
                 // Ensure deep cloning of boxes to maintain immutability
                 let cloned_val = match val {
                     Value::Box(contents) => {
@@ -3512,6 +3788,11 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                     }
                     other => other
                 };
+                // Enforce static type (first assignment defines; changes require rewire)
+                if let Err(msg) = ensure_type_on_store(&env, name, &cloned_val, Some(&context), false) {
+                    trace_mini_row(ip + 1, instr, &stack, true, None);
+                    return Err(msg);
+                }
                 env.insert(name.clone(), cloned_val);
             }
             
@@ -3936,6 +4217,35 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                         let s = pop_string_arg(&mut stack, "URL_DECODE", "string")?;
                         let out = urlencoding::decode(&s).map_err(|e| format!("URL_DECODE error: {}", e))?.into_owned();
                         stack.push(Value::Str(out));
+                    }
+                    // Casts/constructors at top-level
+                    "int" => {
+                        ensure_arity_one_of("INT", *arg_count, &[1], "(x)")?;
+                        let v = stack.pop().unwrap();
+                        let out = match v {
+                            Value::Int(n) => Value::Int(n),
+                            Value::Float(f) => Value::Int(f as i64),
+                            Value::Bool(b) => Value::Int(if b {1} else {0}),
+                            Value::Str(s) => {
+                                let ss = s.trim();
+                                match ss.parse::<i64>() { Ok(n) => Value::Int(n), Err(_) => return Err("INT: cannot parse integer from string".to_string()) }
+                            }
+                            _ => return Err("INT: unsupported argument type".to_string()),
+                        };
+                        stack.push(out);
+                    }
+                    "str" => {
+                        ensure_arity_one_of("STR", *arg_count, &[1], "(x)")?;
+                        let v = stack.pop().unwrap();
+                        stack.push(Value::Str(v.format_for_display()));
+                    }
+                    "int_box" => {
+                        ensure_arity_one_of("INT_BOX", *arg_count, &[0], "()")?;
+                        stack.push(Value::Box(vec![]));
+                    }
+                    "str_box" => {
+                        ensure_arity_one_of("STR_BOX", *arg_count, &[0], "()")?;
+                        stack.push(Value::Box(vec![]));
                     }
                     // Core-8 Hardware Functions (top-level)
                     "time_counter" => {
@@ -6221,6 +6531,8 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                                 
                                 let mut func_env_mut = func_env;
                                 push_call_frame(&name, context.source_file.clone(), context.current_line);
+                                // Mark rewire target in local env to permit type change during rewire
+                                if let Some(target) = &rewire_target { add_rewired(&mut func_env_mut, target); }
                                 let result = match execute_function(&body, &mut stack, &mut func_env_mut, Some(&context)) {
                                     Ok(v) => { pop_call_frame(); Ok(v) }
                                     Err(e) => { pop_call_frame(); Err(e) }
@@ -6228,6 +6540,8 @@ pub fn run_with_context(program: &[OpCode], source_file: Option<&str>, current_l
                                 // If this is a rewire function, propagate the target back to env
                                 if let Some(target) = rewire_target {
                                     if let Some(new_val) = func_env_mut.get(&target) {
+                                        // Rewire explicitly allows type change at top-level env
+                                        let _ = ensure_type_on_store(&env, &target, new_val, Some(&context), true)?;
                                         env.insert(target.clone(), new_val.clone());
                                     }
                                 }

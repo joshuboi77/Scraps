@@ -10,6 +10,10 @@ pub struct Compiler {
     labels: HashMap<String, usize>,
     label_counter: usize,
     jump_patches: Vec<(usize, String)>, // (instruction_index, label_name) pairs to patch
+    // Simple compile-time type checking (best-effort)
+    type_env: HashMap<String, CType>,
+    // When compiling a rewire block, allow this variable to change type
+    rewire_ok: Option<String>,
 }
 
 impl Compiler {
@@ -19,10 +23,12 @@ impl Compiler {
             labels: HashMap::new(),
             label_counter: 0,
             jump_patches: Vec::new(),
+            type_env: HashMap::new(),
+            rewire_ok: None,
         }
     }
 
-    pub fn compile(&mut self, statements: Vec<Stmt>) -> Vec<OpCode> {
+    pub fn compile(&mut self, statements: Vec<Stmt>) -> Result<Vec<OpCode>, String> {
         self.program.clear();
         self.labels.clear();
         self.label_counter = 0;
@@ -30,17 +36,17 @@ impl Compiler {
         
         // First pass: compile all statements and collect labels
         for stmt in statements {
-            self.compile_statement(stmt);
+            self.compile_statement(stmt)?;
         }
         
         // Patch all jump targets with correct positions
         self.patch_jumps();
         
         self.program.push(OpCode::Halt);
-        self.program.clone()
+        Ok(self.program.clone())
     }
 
-    fn compile_statement(&mut self, stmt: Stmt) {
+    fn compile_statement(&mut self, stmt: Stmt) -> Result<(), String> {
         match stmt {
             Stmt::Line(n) => {
                 // Insert a SetLine marker for runtime context
@@ -64,6 +70,21 @@ impl Compiler {
             }
             
             Stmt::Assignment { name, value } => {
+                // Compile-time type check (best-effort)
+                if let Some(rhs_ty) = self.infer_expr_type(&value) {
+                    if let Some(prev) = self.type_env.get(&name).cloned() {
+                        if prev != rhs_ty {
+                            let allowed = self.rewire_ok.as_ref().map(|s| s == &name).unwrap_or(false);
+                            if !allowed {
+                                return Err(format!(
+                                    "Compile-time TYPE error: '{}' was {:?}, assigned {:?}. Use rewire to change type",
+                                    name, prev, rhs_ty
+                                ));
+                            }
+                        }
+                    }
+                    self.type_env.insert(name.clone(), rhs_ty);
+                }
                 self.compile_expression(value);
                 self.program.push(OpCode::StoreVar(name));
             }
@@ -81,7 +102,7 @@ impl Compiler {
                 self.jump_patches.push((self.program.len() - 1, else_label.clone()));
                 
                 // Compile then block
-                self.compile_block(then_block);
+                self.compile_block(then_block)?;
                 
                 // Jump to end (skip else block)
                 let end_label = format!("if_end_{}", current_counter);
@@ -90,7 +111,7 @@ impl Compiler {
                 
                 // Compile else block
                 self.program.push(OpCode::Label(else_label));
-                self.compile_block(else_block);
+                self.compile_block(else_block)?;
                 
                 // End label
                 self.program.push(OpCode::Label(end_label));
@@ -115,7 +136,7 @@ impl Compiler {
                 // Compile body
                 let body_label = format!("while_body_{}", current_counter);
                 self.program.push(OpCode::Label(body_label));
-                self.compile_block(body);
+                self.compile_block(body)?;
                 
                 // Jump back to condition
                 self.program.push(OpCode::Jump(0)); // Placeholder
@@ -130,13 +151,45 @@ impl Compiler {
                 self.compile_expression(target.clone());
                 
                 // For each value, pack it into the box
+                let mut inferred_elems: Vec<CType> = Vec::new();
                 for value in values {
+                    if let Some(t) = self.infer_expr_type(&value) { inferred_elems.push(t); }
                     self.compile_expression(value);
                     self.program.push(OpCode::Pack);
                 }
                 
                 // Store the updated box back to the variable
                 if let Expr::Variable(name) = target {
+                    // Compile-time check: enforce int_box/str_box element types when known
+                    let prev = self.type_env.get(&name).cloned();
+                    let elem_kind = if inferred_elems.iter().all(|t| matches!(t, CType::Int)) {
+                        Some(CType::Int)
+                    } else if inferred_elems.iter().all(|t| matches!(t, CType::Str)) {
+                        Some(CType::Str)
+                    } else { None };
+
+                    match prev {
+                        Some(CType::BoxInt) => {
+                            if let Some(CType::Int) = elem_kind { /* ok */ } else if !inferred_elems.is_empty() {
+                                return Err(format!("Compile-time TYPE error: '{}' is BoxInt, but pack contains non-Int element(s)", name));
+                            }
+                        }
+                        Some(CType::BoxStr) => {
+                            if let Some(CType::Str) = elem_kind { /* ok */ } else if !inferred_elems.is_empty() {
+                                return Err(format!("Compile-time TYPE error: '{}' is BoxStr, but pack contains non-Str element(s)", name));
+                            }
+                        }
+                        Some(CType::Box) | None => {
+                            // If not typed yet, specialize if all elements are consistent
+                            if let Some(CType::Int) = elem_kind { self.type_env.insert(name.clone(), CType::BoxInt); }
+                            else if let Some(CType::Str) = elem_kind { self.type_env.insert(name.clone(), CType::BoxStr); }
+                            else { self.type_env.insert(name.clone(), CType::Box); }
+                        }
+                        Some(other) => {
+                            // If variable had a scalar type, using it as box is an error
+                            return Err(format!("Compile-time TYPE error: '{}' is {:?}, but used as Box with pack()", name, other));
+                        }
+                    }
                     self.program.push(OpCode::StoreVar(name));
                 } else {
                     // TODO: Handle non-variable targets
@@ -150,6 +203,8 @@ impl Compiler {
                 
                 // For each (index, value) pair
                 for (index, value) in pairs {
+                    // Infer value type for element-type checking
+                    let val_ty = self.infer_expr_type(&value);
                     // Don't put index on stack - it's passed as OpCode parameter
                     self.compile_expression(value);
                     // TODO: Implement Place with dynamic index
@@ -160,10 +215,43 @@ impl Compiler {
                         // TODO: Handle dynamic indices
                         panic!("Dynamic indices not yet implemented");
                     }
+                    // After each place value, update/check the box variable type
+                    if let Expr::Variable(ref name) = target {
+                        let prev = self.type_env.get(name).cloned();
+                        match prev {
+                            Some(CType::BoxInt) => {
+                                if let Some(CType::Str) = val_ty {
+                                    return Err(format!("Compile-time TYPE error: '{}' is BoxInt, but place sets Str", name));
+                                }
+                            }
+                            Some(CType::BoxStr) => {
+                                if let Some(CType::Int) = val_ty {
+                                    return Err(format!("Compile-time TYPE error: '{}' is BoxStr, but place sets Int", name));
+                                }
+                            }
+                            Some(CType::Box) => { /* ok, dynamic box */ }
+                            None => {
+                                // Specialize if known
+                                if let Some(CType::Int) = val_ty { self.type_env.insert(name.clone(), CType::BoxInt); }
+                                else if let Some(CType::Str) = val_ty { self.type_env.insert(name.clone(), CType::BoxStr); }
+                                else { self.type_env.insert(name.clone(), CType::Box); }
+                            }
+                            Some(other) => {
+                                return Err(format!("Compile-time TYPE error: '{}' is {:?}, but used as Box with place()", name, other));
+                            }
+                        }
+                    }
                 }
                 
                 // Store the updated box back to the variable
                 if let Expr::Variable(name) = target {
+                    // Ensure final type is some Box variant
+                    let prev = self.type_env.get(&name).cloned();
+                    match prev {
+                        Some(CType::BoxInt) | Some(CType::BoxStr) | Some(CType::Box) => {}
+                        None => { self.type_env.insert(name.clone(), CType::Box); }
+                        Some(other) => return Err(format!("Compile-time TYPE error: '{}' is {:?}, but used as Box with place()", name, other)),
+                    }
                     self.program.push(OpCode::StoreVar(name));
                 } else {
                     // TODO: Handle non-variable targets
@@ -174,7 +262,9 @@ impl Compiler {
             Stmt::FunctionDef { name, parameters, body } => {
                 // Compile the function body into bytecode
                 let mut body_compiler = Compiler::new();
-                body_compiler.compile_block(body);
+                // Inherit type environment (best-effort)
+                body_compiler.type_env = self.type_env.clone();
+                body_compiler.compile_block(body)?;
                 body_compiler.patch_jumps(); // CRITICAL: Patch jumps for function body
                 let function_body = body_compiler.program;
                 
@@ -190,7 +280,11 @@ impl Compiler {
             Stmt::Rewire { _target, body, destination } => {
                 // Compile rewire block into a function body; store as a function with a rewire target
                 let mut body_compiler = Compiler::new();
-                body_compiler.compile_block(body);
+                body_compiler.type_env = self.type_env.clone();
+                body_compiler.rewire_ok = Some(_target.clone());
+                body_compiler.compile_block(body)?;
+                // Ensure function returns the rewired variable to make the ceremony output be the variable itself
+                body_compiler.program.push(OpCode::LoadVar(_target.clone()));
                 body_compiler.patch_jumps(); // CRITICAL: Patch jumps for rewire body
                 let function_body = body_compiler.program;
                 self.program.push(OpCode::MakeFuncWithBody {
@@ -199,6 +293,11 @@ impl Compiler {
                     body: function_body,
                     rewire_target: Some(_target.clone()),
                 });
+                // Immediately apply the rewire: result(destination)
+                // Push function value (LoadVar), then call result with 1 arg
+                self.program.push(OpCode::LoadVar(destination.clone()));
+                self.program.push(OpCode::PushStr("result".to_string()));
+                self.program.push(OpCode::Call("".to_string(), 1));
             }
             
             Stmt::Write { content, filename } => {
@@ -240,12 +339,14 @@ impl Compiler {
                 self.program.push(OpCode::Call("".to_string(), 2));
             }
         }
+        Ok(())
     }
 
-    fn compile_block(&mut self, block: Block) {
+    fn compile_block(&mut self, block: Block) -> Result<(), String> {
         for stmt in block.statements {
-            self.compile_statement(stmt);
+            self.compile_statement(stmt)?;
         }
+        Ok(())
     }
 
     fn compile_expression(&mut self, expr: Expr) {
@@ -400,7 +501,7 @@ impl Compiler {
                 self.jump_patches.push((jump_if_not_index, else_label.clone()));
                 
                 // Compile then block directly (no separate compiler)
-                self.compile_block(then_block);
+                let _ = self.compile_block(then_block);
                 
                 // Jump to end (skip else block) (placeholder target)
                 let jump_index = self.program.len();
@@ -409,7 +510,7 @@ impl Compiler {
                 
                 // Else block
                 self.set_label(else_label);
-                self.compile_block(else_block);
+                let _ = self.compile_block(else_block);
                 
                 // End label
                 self.set_label(end_label);
@@ -456,3 +557,42 @@ impl Compiler {
 }
 
 // Legacy compile() removed — use Parser + Compiler::compile
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CType {
+    Int,
+    Float,
+    Bool,
+    Str,
+    Box,
+    BoxInt,
+    BoxStr,
+}
+
+impl Compiler {
+    fn infer_expr_type(&self, expr: &Expr) -> Option<CType> {
+        match expr {
+            Expr::Number(TokenValue::Int(_)) => Some(CType::Int),
+            Expr::Number(TokenValue::Float(_)) => Some(CType::Float),
+            Expr::String(_) => Some(CType::Str),
+            Expr::Bool(_) => Some(CType::Bool),
+            Expr::List(_) => Some(CType::Box),
+            Expr::Variable(_name) => None, // unknown at compile-time
+            Expr::Group(inner) => self.infer_expr_type(inner),
+            Expr::FunctionCall { function, .. } => {
+                if let Expr::Variable(name) = &**function {
+                    match name.as_str() {
+                        "int" | "INT" => Some(CType::Int),
+                        "str" | "STR" => Some(CType::Str),
+                        "string" | "STRING" => Some(CType::Str),
+                        "int_box" | "INT_BOX" => Some(CType::BoxInt),
+                        "str_box" | "STR_BOX" => Some(CType::BoxStr),
+                        "box" | "BOX" => Some(CType::Box),
+                        _ => None,
+                    }
+                } else { None }
+            }
+            _ => None,
+        }
+    }
+}

@@ -1,0 +1,10 @@
+# This file triggers a runtime TYPE error with stack trace
+
+print "=== Runtime type error with stack ==="
+
+fn(use()) {
+  a = substring("hi", 0, 1)  # compile-time unknown -> at runtime becomes Str
+  a = 1         # runtime TYPE error on StoreVar
+} -> bad_runtime
+
+result(bad_runtime)
